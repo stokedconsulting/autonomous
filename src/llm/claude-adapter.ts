@@ -46,12 +46,14 @@ export class ClaudeAdapter implements LLMAdapter {
     // Start Claude in the worktree directory
     // We'll use a background process approach
     const cliPath = this.config.cliPath || 'claude';
+    const cliArgs = this.config.cliArgs || [];
+    const cliArgsString = cliArgs.length > 0 ? ' ' + cliArgs.join(' ') : '';
 
     // Create a script to run Claude with the prompt
     const scriptPath = join(this.autonomousDataDir, `start-${instanceId}.sh`);
     const script = `#!/bin/bash
 cd "${workingDirectory}"
-cat "${promptFile}" | ${cliPath} chat
+cat "${promptFile}" | ${cliPath}${cliArgsString} chat
 `;
 
     await fs.writeFile(scriptPath, script, 'utf-8');

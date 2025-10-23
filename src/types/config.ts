@@ -8,6 +8,7 @@ export interface LLMConfig {
   enabled: boolean;
   maxConcurrentIssues: number;
   cliPath?: string;
+  cliArgs?: string[];
   hooksEnabled?: boolean;
   apiKey?: string;
   model?: string;

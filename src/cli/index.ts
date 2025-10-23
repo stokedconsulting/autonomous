@@ -60,6 +60,7 @@ config
   .command('add-llm <provider>')
   .description('Add and configure an LLM provider (claude, gemini, codex)')
   .option('--cli-path <path>', 'Path to LLM CLI executable')
+  .option('--cli-args <args>', 'Additional CLI arguments (e.g., "--debug hooks")')
   .option('--api-key <key>', 'API key for the LLM')
   .option('--max-concurrent <number>', 'Maximum concurrent issues', parseInt)
   .option('--enable-hooks', 'Enable hooks support')

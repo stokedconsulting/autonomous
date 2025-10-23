@@ -15,6 +15,7 @@ interface InitOptions {
 
 interface AddLLMOptions {
   cliPath?: string;
+  cliArgs?: string;
   apiKey?: string;
   maxConcurrent?: number;
   enableHooks?: boolean;
@@ -101,9 +102,15 @@ async function addLLM(provider: string, options: AddLLMOptions): Promise<void> {
     // Load existing config
     await configManager.load();
 
+    // Parse CLI args if provided (space-separated string to array)
+    const cliArgs = options.cliArgs
+      ? options.cliArgs.split(' ').filter(arg => arg.length > 0)
+      : undefined;
+
     // Enable the LLM with provided options
     await configManager.enableLLM(provider as LLMProvider, {
       cliPath: options.cliPath,
+      cliArgs,
       apiKey: options.apiKey,
       maxConcurrentIssues: options.maxConcurrent || 1,
       hooksEnabled: options.enableHooks || false,
@@ -160,6 +167,9 @@ async function show(options: ShowOptions): Promise<void> {
           console.log(`    Max concurrent: ${llmConfig.maxConcurrentIssues}`);
           if (llmConfig.cliPath) {
             console.log(`    CLI path: ${llmConfig.cliPath}`);
+          }
+          if (llmConfig.cliArgs && llmConfig.cliArgs.length > 0) {
+            console.log(`    CLI args: ${llmConfig.cliArgs.join(' ')}`);
           }
           if (llmConfig.hooksEnabled) {
             console.log(`    Hooks: ${chalk.green('enabled')}`);

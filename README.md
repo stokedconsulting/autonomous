@@ -71,7 +71,9 @@ Sibling Directories (Worktrees)
     "claude": {
       "enabled": true,
       "maxConcurrentIssues": 1,
-      "cliPath": "claude"
+      "cliPath": "claude",
+      "cliArgs": ["--debug", "hooks"],
+      "hooksEnabled": true
     }
   },
   "github": {
@@ -85,6 +87,12 @@ Sibling Directories (Worktrees)
   }
 }
 ```
+
+**Key Configuration Options:**
+- `cliPath` - Path to the Claude CLI executable
+- `cliArgs` - Array of additional arguments to pass to Claude CLI (e.g., `["--debug", "hooks"]`)
+- `hooksEnabled` - Enable hook integration for session tracking
+- `maxConcurrentIssues` - How many issues Claude can work on simultaneously
 
 ## Commands
 
@@ -121,6 +129,7 @@ Add and configure an LLM provider (claude, gemini, codex).
 
 **Options:**
 - `--cli-path <path>` - Path to LLM CLI executable
+- `--cli-args <args>` - Additional CLI arguments (e.g., `"--debug hooks"`)
 - `--max-concurrent <number>` - Maximum concurrent issues
 - `--enable-hooks` - Enable hooks support (recommended for Claude)
 
@@ -209,8 +218,11 @@ If you prefer to configure manually or override auto-detection:
 # Initialize with explicit owner/repo
 autonomous config init --github-owner myorg --github-repo myrepo
 
-# Add Claude with custom CLI path
+# Add Claude with custom CLI path and args
 autonomous config add-llm claude --cli-path /usr/local/bin/claude --enable-hooks
+
+# Add Claude with debug flags
+autonomous config add-llm claude --cli-args "--debug hooks" --enable-hooks
 
 # Set maximum concurrent issues
 autonomous config add-llm claude --max-concurrent 2
