@@ -19,24 +19,23 @@ Autonomous is a CLI tool that coordinates Claude, Gemini, and Codex to work inde
 # Install globally
 npm install -g @stokedconsulting/autonomous
 
-# Or use in a project
-npm install --save-dev @stokedconsulting/autonomous
+# Set your GitHub token
+export GITHUB_TOKEN=your_github_token_here
 
 # Navigate to your project (must be a git repo with GitHub remote)
 cd my-project
 
-# Initialize configuration (auto-detects GitHub owner/repo from git remote)
-autonomous config init
-
-# Add an LLM provider
-autonomous config add-llm claude --enable-hooks
-
-# Start autonomous mode (or just run 'autonomous')
-autonomous start
-
-# Or simply:
+# That's it! Just run:
 autonomous
 ```
+
+On first run, `autonomous` will automatically:
+- ✓ Detect your GitHub repository from git remote
+- ✓ Create `.autonomous-config.json`
+- ✓ Configure Claude with hooks enabled
+- ✓ Start processing issues
+
+No manual configuration needed!
 
 ## How It Works
 
@@ -183,19 +182,16 @@ npm test
 
 ## Examples
 
-### Basic Usage
+### Basic Usage (Zero Configuration)
 
 ```bash
 # In a git repository with GitHub remote
 cd my-project
 
-# Initialize (auto-detects owner/repo from git remote)
-autonomous config init
+# Set GitHub token (one time)
+export GITHUB_TOKEN=your_token
 
-# Add Claude
-autonomous config add-llm claude --enable-hooks
-
-# Start (or just run 'autonomous')
+# Just run it - everything auto-configures on first run!
 autonomous
 
 # View what's happening
@@ -205,10 +201,12 @@ autonomous status
 autonomous status --watch
 ```
 
-### Custom Configuration
+### Manual Configuration (Optional)
+
+If you prefer to configure manually or override auto-detection:
 
 ```bash
-# Initialize with explicit owner/repo (overrides auto-detection)
+# Initialize with explicit owner/repo
 autonomous config init --github-owner myorg --github-repo myrepo
 
 # Add Claude with custom CLI path
@@ -222,6 +220,9 @@ autonomous config show
 
 # Validate configuration
 autonomous config validate
+
+# Then start
+autonomous
 ```
 
 ### Running in Dry-Run Mode
@@ -232,6 +233,32 @@ autonomous --dry-run
 
 # Or with verbose output
 autonomous --dry-run --verbose
+```
+
+### What Happens on First Run
+
+When you run `autonomous` for the first time in a project:
+
+```
+🚀 Starting Autonomous Mode
+
+First run detected - auto-configuring...
+
+Detecting GitHub repository from git remote...
+✓ Detected: stokedconsulting/my-project
+
+Initializing configuration...
+Configuring Claude with hooks enabled...
+✓ Configuration created and Claude enabled
+
+Configuration saved to .autonomous-config.json
+You can customize settings with: autonomous config show
+
+Loading configuration...
+✓ Configuration loaded
+Initializing assignment tracking...
+✓ Assignment tracking initialized
+Starting orchestrator...
 ```
 
 ## Troubleshooting
