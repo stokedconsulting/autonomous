@@ -4,6 +4,7 @@
 
 import { ConfigManager } from '../../core/config-manager.js';
 import { LLMProvider } from '../../types/index.js';
+import { parseGitHubRemote } from '../../git/utils.js';
 import chalk from 'chalk';
 
 interface InitOptions {
@@ -40,16 +41,34 @@ async function init(options: InitOptions): Promise<void> {
 
     console.log(chalk.blue('Initializing autonomous configuration...\n'));
 
-    // Initialize with provided options
-    await configManager.initialize(options.githubOwner, options.githubRepo);
+    // Auto-detect GitHub owner/repo from git remote if not provided
+    let { githubOwner, githubRepo } = options;
+
+    if (!githubOwner || !githubRepo) {
+      console.log('Detecting GitHub repository from git remote...');
+      const remoteInfo = await parseGitHubRemote(cwd);
+
+      if (remoteInfo) {
+        githubOwner = githubOwner || remoteInfo.owner;
+        githubRepo = githubRepo || remoteInfo.repo;
+        console.log(chalk.green(`✓ Detected: ${githubOwner}/${githubRepo}\n`));
+      } else {
+        console.log(chalk.yellow('Could not detect GitHub repository from git remote.\n'));
+      }
+    }
+
+    // Initialize with provided or detected options
+    await configManager.initialize(githubOwner, githubRepo);
 
     console.log(chalk.green('✓ Configuration created: .autonomous-config.json'));
 
-    if (!options.githubOwner || !options.githubRepo) {
+    if (!githubOwner || !githubRepo) {
       console.log(chalk.yellow('\nWarning: GitHub owner/repo not set.'));
       console.log('Set them with:');
       console.log('  autonomous config set github.owner <owner>');
       console.log('  autonomous config set github.repo <repo>');
+    } else {
+      console.log(chalk.green(`\n✓ GitHub repository: ${githubOwner}/${githubRepo}`));
     }
 
     console.log(chalk.blue('\nNext steps:'));

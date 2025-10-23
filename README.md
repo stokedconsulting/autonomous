@@ -22,14 +22,20 @@ npm install -g @stokedconsulting/autonomous
 # Or use in a project
 npm install --save-dev @stokedconsulting/autonomous
 
-# Navigate to your project
+# Navigate to your project (must be a git repo with GitHub remote)
 cd my-project
 
-# Initialize configuration
+# Initialize configuration (auto-detects GitHub owner/repo from git remote)
 autonomous config init
 
-# Start autonomous mode
+# Add an LLM provider
+autonomous config add-llm claude --enable-hooks
+
+# Start autonomous mode (or just run 'autonomous')
 autonomous start
+
+# Or simply:
+autonomous
 ```
 
 ## How It Works
@@ -83,20 +89,50 @@ Sibling Directories (Worktrees)
 
 ## Commands
 
-### `autonomous start`
-Start autonomous mode and begin processing issues.
+### `autonomous` or `autonomous start`
+Start autonomous mode and begin processing issues. Running `autonomous` without any command defaults to `start`.
+
+**Options:**
+- `-d, --dry-run` - Simulate without actually starting LLMs
+- `-v, --verbose` - Enable verbose logging
 
 ### `autonomous stop`
 Stop all running LLM instances and save state.
 
+**Options:**
+- `-f, --force` - Force stop all instances
+
 ### `autonomous status`
 View current assignments and their status.
 
+**Options:**
+- `-j, --json` - Output as JSON
+- `-w, --watch` - Watch mode - continuously update status
+
 ### `autonomous config init`
-Initialize configuration in the current project.
+Initialize configuration in the current project. Auto-detects GitHub owner/repo from git remote.
+
+**Options:**
+- `--github-owner <owner>` - Override detected GitHub owner
+- `--github-repo <repo>` - Override detected GitHub repo
+- `--interactive` - Interactive configuration setup
 
 ### `autonomous config add-llm <provider>`
 Add and configure an LLM provider (claude, gemini, codex).
+
+**Options:**
+- `--cli-path <path>` - Path to LLM CLI executable
+- `--max-concurrent <number>` - Maximum concurrent issues
+- `--enable-hooks` - Enable hooks support (recommended for Claude)
+
+### `autonomous config show`
+Display current configuration.
+
+**Options:**
+- `-j, --json` - Output as JSON
+
+### `autonomous config validate`
+Validate current configuration.
 
 ## LLM Support
 
@@ -150,24 +186,52 @@ npm test
 ### Basic Usage
 
 ```bash
-# Start with default configuration
-autonomous start
+# In a git repository with GitHub remote
+cd my-project
+
+# Initialize (auto-detects owner/repo from git remote)
+autonomous config init
+
+# Add Claude
+autonomous config add-llm claude --enable-hooks
+
+# Start (or just run 'autonomous')
+autonomous
 
 # View what's happening
 autonomous status
+
+# Watch status in real-time
+autonomous status --watch
 ```
 
 ### Custom Configuration
 
 ```bash
-# Initialize with specific settings
+# Initialize with explicit owner/repo (overrides auto-detection)
 autonomous config init --github-owner myorg --github-repo myrepo
 
-# Add Claude with custom path
-autonomous config add-llm claude --cli-path /usr/local/bin/claude
+# Add Claude with custom CLI path
+autonomous config add-llm claude --cli-path /usr/local/bin/claude --enable-hooks
 
 # Set maximum concurrent issues
-autonomous config set llms.claude.maxConcurrentIssues 2
+autonomous config add-llm claude --max-concurrent 2
+
+# View configuration
+autonomous config show
+
+# Validate configuration
+autonomous config validate
+```
+
+### Running in Dry-Run Mode
+
+```bash
+# See what would happen without actually starting LLMs
+autonomous --dry-run
+
+# Or with verbose output
+autonomous --dry-run --verbose
 ```
 
 ## Troubleshooting

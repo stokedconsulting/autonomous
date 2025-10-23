@@ -15,9 +15,12 @@ const program = new Command();
 program
   .name('autonomous')
   .description('Orchestrate multiple LLM instances to autonomously work on GitHub issues')
-  .version('0.1.0');
+  .version('0.1.0')
+  .option('-d, --dry-run', 'Simulate without actually starting LLMs')
+  .option('-v, --verbose', 'Enable verbose logging')
+  .action(startCommand); // Default action when no command is specified
 
-// Start command
+// Start command (explicit)
 program
   .command('start')
   .description('Start autonomous mode and begin processing issues')
