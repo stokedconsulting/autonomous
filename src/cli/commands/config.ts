@@ -3,7 +3,7 @@
  */
 
 import { ConfigManager } from '../../core/config-manager.js';
-import { LLMProvider } from '../../types/index.js';
+import { LLMProvider, LLMConfig } from '../../types/index.js';
 import { parseGitHubRemote } from '../../git/utils.js';
 import chalk from 'chalk';
 
@@ -107,14 +107,16 @@ async function addLLM(provider: string, options: AddLLMOptions): Promise<void> {
       ? options.cliArgs.split(' ').filter(arg => arg.length > 0)
       : undefined;
 
+    // Build update object, only including fields that were explicitly provided
+    const updateConfig: Partial<LLMConfig> = {};
+    if (options.cliPath) updateConfig.cliPath = options.cliPath;
+    if (cliArgs) updateConfig.cliArgs = cliArgs;
+    if (options.apiKey) updateConfig.apiKey = options.apiKey;
+    if (options.maxConcurrent) updateConfig.maxConcurrentIssues = options.maxConcurrent;
+    if (options.enableHooks !== undefined) updateConfig.hooksEnabled = options.enableHooks;
+
     // Enable the LLM with provided options
-    await configManager.enableLLM(provider as LLMProvider, {
-      cliPath: options.cliPath,
-      cliArgs,
-      apiKey: options.apiKey,
-      maxConcurrentIssues: options.maxConcurrent || 1,
-      hooksEnabled: options.enableHooks || false,
-    });
+    await configManager.enableLLM(provider as LLMProvider, updateConfig);
 
     console.log(chalk.green(`✓ ${provider} enabled`));
 

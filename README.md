@@ -31,8 +31,9 @@ autonomous
 
 On first run, `autonomous` will automatically:
 - ✓ Detect your GitHub repository from git remote
+- ✓ Detect Claude CLI path (even if it's a shell alias)
 - ✓ Create `.autonomous-config.json`
-- ✓ Configure Claude with hooks enabled
+- ✓ Configure Claude with hooks and `--dangerously-skip-permissions` enabled
 - ✓ Start processing issues
 
 No manual configuration needed!
@@ -71,8 +72,8 @@ Sibling Directories (Worktrees)
     "claude": {
       "enabled": true,
       "maxConcurrentIssues": 1,
-      "cliPath": "claude",
-      "cliArgs": ["--debug", "hooks"],
+      "cliPath": "/Users/you/.claude/local/claude",
+      "cliArgs": ["--dangerously-skip-permissions"],
       "hooksEnabled": true
     }
   },
@@ -89,8 +90,10 @@ Sibling Directories (Worktrees)
 ```
 
 **Key Configuration Options:**
-- `cliPath` - Path to the Claude CLI executable
-- `cliArgs` - Array of additional arguments to pass to Claude CLI (e.g., `["--debug", "hooks"]`)
+- `cliPath` - Path to the Claude CLI executable (auto-detected from shell)
+- `cliArgs` - Array of additional arguments to pass to Claude CLI
+  - Default: `["--dangerously-skip-permissions"]` (prevents constant permission prompts)
+  - Add debug: `["--dangerously-skip-permissions", "--debug", "hooks"]`
 - `hooksEnabled` - Enable hook integration for session tracking
 - `maxConcurrentIssues` - How many issues Claude can work on simultaneously
 

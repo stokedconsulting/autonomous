@@ -50,8 +50,10 @@ export class ClaudeAdapter implements LLMAdapter {
     const cliArgsString = cliArgs.length > 0 ? ' ' + cliArgs.join(' ') : '';
 
     // Create a script to run Claude with the prompt
+    // Use user's shell to ensure PATH is set correctly
+    const userShell = process.env.SHELL || '/bin/bash';
     const scriptPath = join(this.autonomousDataDir, `start-${instanceId}.sh`);
-    const script = `#!/bin/bash
+    const script = `#!${userShell}
 cd "${workingDirectory}"
 cat "${promptFile}" | ${cliPath}${cliArgsString} chat
 `;
@@ -186,8 +188,23 @@ cat "${promptFile}" | ${cliPath}${cliArgsString} chat
   async isInstalled(): Promise<boolean> {
     try {
       const cliPath = this.config.cliPath || 'claude';
-      await $`command -v ${cliPath}`;
-      return true;
+
+      // Try which command (works better across different shells)
+      try {
+        await $`which ${cliPath}`;
+        return true;
+      } catch {
+        // Fallback to command -v
+        try {
+          await $`command -v ${cliPath}`;
+          return true;
+        } catch {
+          // Try with user's shell
+          const shell = process.env.SHELL || '/bin/bash';
+          await $`${shell} -l -c "which ${cliPath}"`;
+          return true;
+        }
+      }
     } catch {
       return false;
     }

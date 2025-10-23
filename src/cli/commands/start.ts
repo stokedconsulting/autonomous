@@ -50,8 +50,30 @@ export async function startCommand(options: StartOptions): Promise<void> {
 
       // Auto-configure Claude with hooks enabled
       console.log('Configuring Claude with hooks enabled...');
+
+      // Try to find the actual Claude path (handles shell aliases)
+      let claudePath = 'claude';
+      try {
+        const { $ } = await import('zx');
+        const shell = process.env.SHELL || '/bin/bash';
+        const result = await $`${shell} -l -c "which claude"`;
+        const detectedPath = result.stdout.trim();
+        if (detectedPath && !detectedPath.includes('aliased')) {
+          claudePath = detectedPath;
+        } else if (detectedPath.includes('aliased to ')) {
+          // Extract path from alias output like "claude: aliased to /path/to/claude"
+          const match = detectedPath.match(/aliased to (.+)/);
+          if (match) {
+            claudePath = match[1].trim();
+          }
+        }
+      } catch {
+        // Keep default 'claude' if detection fails
+      }
+
       await configManager.enableLLM('claude', {
-        cliPath: 'claude',
+        cliPath: claudePath,
+        cliArgs: ['--dangerously-skip-permissions'],
         maxConcurrentIssues: 1,
         hooksEnabled: true,
       });

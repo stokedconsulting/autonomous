@@ -63,7 +63,11 @@ export class Orchestrator {
       // Check if LLM is installed
       const isInstalled = await adapter.isInstalled();
       if (!isInstalled) {
-        console.warn(chalk.yellow(`Warning: ${provider} CLI not found at ${llmConfig.cliPath || 'default path'}`));
+        console.warn(chalk.yellow(`Warning: ${provider} CLI not found`));
+        console.warn(chalk.gray(`  Searched for: ${llmConfig.cliPath || provider}`));
+        console.warn(chalk.gray(`  If '${provider}' is a shell alias, use the full path instead:`));
+        console.warn(chalk.gray(`  Run: which ${provider}  # to find the actual path`));
+        console.warn(chalk.gray(`  Then: autonomous config add-llm ${provider} --cli-path /full/path/to/${provider}`));
       }
 
       this.adapters.set(provider, adapter);

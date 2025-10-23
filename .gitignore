@@ -40,3 +40,6 @@ yarn-error.log*
 
 # Test files
 test-projects/
+# Config files
+.autonomous-config.json
+autonomous-assignments.json
