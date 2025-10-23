@@ -1,0 +1,57 @@
+{
+  "name": "@stokedconsulting/autonomous",
+  "version": "0.1.0",
+  "description": "Autonomous LLM management CLI for coordinating Claude, Gemini, and Codex to work on GitHub issues",
+  "main": "dist/index.js",
+  "bin": {
+    "autonomous": "./dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/cli/index.js",
+    "test": "jest",
+    "lint": "eslint src --ext .ts",
+    "format": "prettier --write \"src/**/*.ts\""
+  },
+  "keywords": [
+    "llm",
+    "autonomous",
+    "cli",
+    "github",
+    "claude",
+    "gemini",
+    "codex",
+    "automation"
+  ],
+  "author": "Stoked Consulting",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/stokedconsulting/autonomous.git"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@octokit/rest": "^20.0.2",
+    "commander": "^11.1.0",
+    "zx": "^7.2.3",
+    "winston": "^3.11.0",
+    "uuid": "^9.0.1",
+    "dotenv": "^16.3.1",
+    "chalk": "^5.3.0",
+    "ora": "^7.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "@types/uuid": "^9.0.7",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.54.0",
+    "jest": "^29.7.0",
+    "prettier": "^3.1.0",
+    "ts-jest": "^29.1.1",
+    "typescript": "^5.3.2"
+  }
+}
