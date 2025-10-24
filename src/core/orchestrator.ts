@@ -86,6 +86,7 @@ export class Orchestrator {
         this.assignmentManager = new AssignmentManager(this.projectPath, {
           projectAPI: this.projectsAPI,
         });
+        await this.assignmentManager.initialize(config.github.owner, this.projectPath);
 
         console.log(chalk.green('✓ GitHub Projects v2 integration enabled'));
       } else {
