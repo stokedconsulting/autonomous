@@ -9,7 +9,7 @@
  */
 
 import { IssueEvaluation } from '../types/evaluation.js';
-import { ProjectItemMetadata, PrioritizationContext, SprintFieldValue } from '../types/project.js';
+import { ProjectItemMetadata, PrioritizationContext, SprintFieldValue, DependencyScore } from '../types/project.js';
 import { ProjectConfig } from '../types/config.js';
 import { ProjectFieldMapper } from '../github/project-field-mapper.js';
 
@@ -34,8 +34,10 @@ export class ProjectAwarePrioritizer {
    */
   calculatePriority(
     evaluation: IssueEvaluation,
-    projectMetadata: ProjectItemMetadata | null
+    projectMetadata: ProjectItemMetadata | null,
+    dependencyScore?: DependencyScore | null
   ): PrioritizationContext {
+    // Support both old and new weight configurations
     const weights = this.config.prioritization?.weights || {
       projectPriority: 0.5,
       aiEvaluation: 0.3,
@@ -59,12 +61,29 @@ export class ProjectAwarePrioritizer {
       ? this.fieldMapper.getSizePreferenceScore(projectMetadata.size)
       : 5; // Default neutral
 
+    // Dependency score (0-10, based on blocking/blocked status)
+    const depScore = dependencyScore ? this.calculateDependencyPriorityScore(dependencyScore) : 5;
+
+    // Get dependency weight (default 0 for backwards compatibility)
+    const depWeight = (weights as any).dependencyScore || 0;
+
     // Calculate weighted hybrid score
-    const hybridScore =
-      aiScore * weights.aiEvaluation +
-      projectPriorityScore * weights.projectPriority +
-      sprintScore * weights.sprintBoost +
-      sizeScore * weights.sizePreference;
+    // If dependency weight is provided, rebalance other weights
+    const hasDepWeight = depWeight > 0;
+    const totalWeight = hasDepWeight
+      ? weights.aiEvaluation + weights.projectPriority + weights.sprintBoost + weights.sizePreference + depWeight
+      : weights.aiEvaluation + weights.projectPriority + weights.sprintBoost + weights.sizePreference;
+
+    const hybridScore = hasDepWeight
+      ? (aiScore * weights.aiEvaluation +
+         projectPriorityScore * weights.projectPriority +
+         sprintScore * weights.sprintBoost +
+         sizeScore * weights.sizePreference +
+         depScore * depWeight) / totalWeight * 10
+      : aiScore * weights.aiEvaluation +
+        projectPriorityScore * weights.projectPriority +
+        sprintScore * weights.sprintBoost +
+        sizeScore * weights.sizePreference;
 
     return {
       issueNumber: evaluation.issueNumber,
@@ -88,11 +107,13 @@ export class ProjectAwarePrioritizer {
    */
   prioritizeIssues(
     evaluations: IssueEvaluation[],
-    projectMetadataMap: Map<number, ProjectItemMetadata>
+    projectMetadataMap: Map<number, ProjectItemMetadata>,
+    dependencyScores?: Map<number, DependencyScore>
   ): PrioritizedIssue[] {
     const prioritized: PrioritizedIssue[] = evaluations.map((evaluation) => {
       const projectMetadata = projectMetadataMap.get(evaluation.issueNumber) || null;
-      const context = this.calculatePriority(evaluation, projectMetadata);
+      const dependencyScore = dependencyScores?.get(evaluation.issueNumber) || null;
+      const context = this.calculatePriority(evaluation, projectMetadata, dependencyScore);
 
       return {
         issueNumber: evaluation.issueNumber,
@@ -191,6 +212,47 @@ export class ProjectAwarePrioritizer {
     } else {
       return 10; // In current sprint - normal boost
     }
+  }
+
+  /**
+   * Calculate dependency priority score
+   * Returns 0-10 based on blocking/blocked status
+   */
+  private calculateDependencyPriorityScore(depScore: DependencyScore): number {
+    // Start with base score of 5 (neutral)
+    let score = 5;
+
+    // Penalize blocked issues
+    if (depScore.isBlocked) {
+      // More penalties for more blockers
+      if (depScore.blockedByCount >= 3) {
+        score -= 5; // Heavily blocked = 0
+      } else if (depScore.blockedByCount === 2) {
+        score -= 3; // Moderately blocked = 2
+      } else {
+        score -= 2; // Lightly blocked = 3
+      }
+    }
+
+    // Reward unblocking high-impact issues
+    if (depScore.blockingScore > 0) {
+      // The more issues this unblocks, the higher the score
+      if (depScore.blockingScore >= 5) {
+        score += 5; // Unblocks many = 10
+      } else if (depScore.blockingScore >= 3) {
+        score += 3; // Unblocks several = 8
+      } else {
+        score += 1; // Unblocks some = 6
+      }
+    }
+
+    // Bonus for leaf nodes (doesn't block anything, easy to complete independently)
+    if (depScore.isLeaf && !depScore.isBlocked) {
+      score += 2; // Independent leaf = +2
+    }
+
+    // Normalize to 0-10 range
+    return Math.max(0, Math.min(10, score));
   }
 
   /**

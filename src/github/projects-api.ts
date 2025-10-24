@@ -481,6 +481,63 @@ export class GitHubProjectsAPI implements ProjectAPI {
   }
 
   /**
+   * Get items in a specific sprint/iteration
+   */
+  async getItemsBySprint(sprintTitle: string): Promise<ProjectItem[]> {
+    const result = await this.queryItems({
+      limit: 100,
+    });
+
+    // Filter by sprint field
+    const sprintFieldName = this.config.fields.sprint?.fieldName;
+    if (!sprintFieldName) {
+      return [];
+    }
+
+    return result.items.filter(item => {
+      const sprint = item.fieldValues[sprintFieldName];
+      return sprint && sprint.title === sprintTitle;
+    });
+  }
+
+  /**
+   * Get items in current sprint
+   */
+  async getCurrentSprintItems(): Promise<ProjectItem[]> {
+    const currentSprint = this.config.fields.sprint?.currentSprint;
+    if (!currentSprint) {
+      return [];
+    }
+
+    return this.getItemsBySprint(currentSprint);
+  }
+
+  /**
+   * Get all sprints/iterations in the project
+   */
+  async getAllSprints(): Promise<Array<{id: string, title: string, startDate: string, duration?: number}>> {
+    const result = await this.queryItems({
+      limit: 100,
+    });
+
+    const sprintFieldName = this.config.fields.sprint?.fieldName;
+    if (!sprintFieldName) {
+      return [];
+    }
+
+    // Extract unique sprints
+    const sprintsMap = new Map<string, any>();
+    result.items.forEach(item => {
+      const sprint = item.fieldValues[sprintFieldName];
+      if (sprint && sprint.id) {
+        sprintsMap.set(sprint.id, sprint);
+      }
+    });
+
+    return Array.from(sprintsMap.values());
+  }
+
+  /**
    * Get field value for a project item
    */
   async getItemFieldValue(projectItemId: string, fieldName: string): Promise<any> {
