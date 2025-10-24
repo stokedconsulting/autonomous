@@ -13,6 +13,7 @@ import { pushCommand } from './commands/push.js';
 import { assignCommand } from './commands/assign.js';
 import { unassignCommand } from './commands/unassign.js';
 import { setupCommand } from './commands/setup.js';
+import { evaluateCommand } from './commands/evaluate.js';
 import {
   projectInitCommand,
   projectStatusCommand,
@@ -116,6 +117,15 @@ program
   .option('--install-all', 'Install all optional dependencies without prompting')
   .option('--skip-prompts', 'Skip all prompts')
   .action(setupCommand);
+
+// Evaluate command
+program
+  .command('evaluate')
+  .description('Evaluate issues and cache results (without starting autonomous mode)')
+  .option('-f, --force', 'Re-evaluate all issues, ignoring cache')
+  .option('-v, --verbose', 'Show detailed evaluation results')
+  .option('-i, --issues <numbers>', 'Comma-separated issue numbers to evaluate (e.g., "1,2,3")')
+  .action(evaluateCommand);
 
 // Project command
 const project = program
