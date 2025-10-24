@@ -48,9 +48,9 @@ export interface ProjectItemsQueryResult {
  * Maps autonomous AssignmentStatus to project Status field values
  */
 const STATUS_MAPPING: Record<AssignmentStatus, string> = {
-  'assigned': 'Todo',              // Just assigned, ready to work
-  'in-progress': 'In Progress',    // LLM is working
-  'llm-complete': 'Ready for Review', // LLM done, PR created, awaiting review
+  'assigned': 'Ready',             // Just assigned, ready to work
+  'in-progress': 'In progress',    // LLM is working
+  'llm-complete': 'In review',     // LLM done, PR created, awaiting review
   'merged': 'Done',                // PR merged
 };
 
@@ -58,12 +58,11 @@ const STATUS_MAPPING: Record<AssignmentStatus, string> = {
  * Reverse mapping for reading from project
  */
 const REVERSE_STATUS_MAPPING: Record<string, AssignmentStatus> = {
-  'Todo': 'assigned',
-  'In Progress': 'in-progress',
-  'Ready for Review': 'llm-complete',
-  'Done': 'merged',
-  'Needs more info': 'assigned',   // Treat as assigned, needs human review
-  'Evaluated': 'assigned',         // Issue evaluated but not assigned yet
+  'Backlog': 'assigned',           // Backlog items treated as ready to assign
+  'Ready': 'assigned',             // Ready to be picked up
+  'In progress': 'in-progress',    // Actively being worked on
+  'In review': 'llm-complete',     // In review after LLM completion
+  'Done': 'merged',                // Completed
 };
 
 export class GitHubProjectsAPI implements ProjectAPI {
