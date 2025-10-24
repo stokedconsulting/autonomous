@@ -43,7 +43,14 @@ export class WorktreeManager {
     // Check if worktree already exists
     const exists = await this.worktreeExists(worktreePath);
     if (exists) {
-      throw new Error(`Worktree already exists at ${worktreePath}`);
+      // Worktree exists - remove it and recreate
+      // This handles cases where a previous run was interrupted
+      console.log(`Worktree already exists at ${worktreePath}, removing and recreating...`);
+      try {
+        await this.removeWorktree(worktreePath, true); // force remove
+      } catch (error) {
+        throw new Error(`Failed to remove existing worktree at ${worktreePath}: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }
 
     // Check if branch already exists
