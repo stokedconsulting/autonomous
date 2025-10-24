@@ -137,6 +137,8 @@ async function init(options: InitOptions): Promise<void> {
                   reviewValue: 'In Review',
                   doneValue: 'Done',
                   blockedValue: 'Blocked',
+                  evaluatedValue: 'Evaluated',
+                  needsMoreInfoValue: 'Needs more info',
                 },
                 priority: {
                   fieldName: 'Priority',

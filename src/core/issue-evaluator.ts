@@ -20,6 +20,7 @@ import {
 import { buildEvaluationPrompt } from '../llm/evaluation-prompt.js';
 import { Issue } from '../types/github.js';
 import { GitHubAPI } from '../github/api.js';
+import { GitHubProjectsAPI } from '../github/projects-api.js';
 import { IssueRelationshipParser } from '../utils/issue-relationship-parser.js';
 
 export class IssueEvaluator {
@@ -27,11 +28,18 @@ export class IssueEvaluator {
   private cache: EvaluationCache | null = null;
   private claudePath: string;
   private githubAPI: GitHubAPI | null = null;
+  private projectsAPI: GitHubProjectsAPI | null = null;
 
-  constructor(projectPath: string, claudePath: string = 'claude', githubAPI?: GitHubAPI) {
+  constructor(
+    projectPath: string,
+    claudePath: string = 'claude',
+    githubAPI?: GitHubAPI,
+    projectsAPI?: GitHubProjectsAPI
+  ) {
     this.cachePath = join(projectPath, '.autonomous', 'issue-evaluations.json');
     this.claudePath = claudePath;
     this.githubAPI = githubAPI || null;
+    this.projectsAPI = projectsAPI || null;
   }
 
   /**
@@ -154,6 +162,24 @@ export class IssueEvaluator {
                 )
               );
             }
+
+            // Update project status to "Evaluated" if project integration is enabled
+            if (this.projectsAPI) {
+              try {
+                const projectItemId = await this.projectsAPI.getProjectItemIdByIssue(issue.number);
+                if (projectItemId) {
+                  const statusConfig = (this.projectsAPI as any).config.fields.status;
+                  await this.projectsAPI.updateItemStatusByValue(projectItemId, statusConfig.evaluatedValue);
+                  if (verbose) {
+                    console.log(chalk.gray(`     ✓ Updated project status to "${statusConfig.evaluatedValue}"`));
+                  }
+                }
+              } catch (error: any) {
+                if (verbose) {
+                  console.log(chalk.gray(`     ⚠️  Failed to update project status: ${error.message}`));
+                }
+              }
+            }
           } else {
             skipped.push(issue);
             if (verbose) {
@@ -184,6 +210,24 @@ export class IssueEvaluator {
               } catch (error: any) {
                 if (verbose) {
                   console.log(chalk.gray(`     ⚠️  Failed to post comment: ${error.message}`));
+                }
+              }
+            }
+
+            // Update project status to "Needs more info" if project integration is enabled
+            if (this.projectsAPI) {
+              try {
+                const projectItemId = await this.projectsAPI.getProjectItemIdByIssue(issue.number);
+                if (projectItemId) {
+                  const statusConfig = (this.projectsAPI as any).config.fields.status;
+                  await this.projectsAPI.updateItemStatusByValue(projectItemId, statusConfig.needsMoreInfoValue);
+                  if (verbose) {
+                    console.log(chalk.gray(`     ✓ Updated project status to "${statusConfig.needsMoreInfoValue}"`));
+                  }
+                }
+              } catch (error: any) {
+                if (verbose) {
+                  console.log(chalk.gray(`     ⚠️  Failed to update project status: ${error.message}`));
                 }
               }
             }

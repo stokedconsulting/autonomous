@@ -88,6 +88,8 @@ export interface ProjectConfig {
       reviewValue: string; // Status for PR review (e.g., "In Review")
       doneValue: string; // Status for completed work (e.g., "Done")
       blockedValue: string; // Status for blocked work (e.g., "Blocked")
+      evaluatedValue: string; // Status for evaluated issues (e.g., "Evaluated")
+      needsMoreInfoValue: string; // Status for issues needing clarification (e.g., "Needs more info")
     };
     priority?: {
       fieldName: string; // Usually "Priority"

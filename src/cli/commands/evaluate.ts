@@ -32,9 +32,24 @@ export async function evaluateCommand(options: EvaluateOptions): Promise<void> {
     const githubToken = await getGitHubToken(config.github.token);
     const githubAPI = new GitHubAPI(githubToken, config.github.owner, config.github.repo);
 
-    // Initialize issue evaluator
+    // Initialize project integration if enabled
+    let projectsAPI;
+    if (config.project?.enabled) {
+      const { GitHubProjectsAPI } = await import('../../github/projects-api.js');
+      const projectId = await resolveProjectIdOrExit(config.github.owner, config.github.repo);
+      projectsAPI = new GitHubProjectsAPI(projectId, config.project);
+
+      // Ensure autonomous view exists with all required fields
+      const claudeConfig = config.llms?.claude?.enabled ? {
+        cliPath: config.llms.claude.cliPath || 'claude',
+        cliArgs: config.llms.claude.cliArgs,
+      } : undefined;
+      await projectsAPI.ensureAutonomousView(claudeConfig);
+    }
+
+    // Initialize issue evaluator with project API if available
     const claudePath = config.llms?.claude?.cliPath || 'claude';
-    const issueEvaluator = new IssueEvaluator(cwd, claudePath, githubAPI);
+    const issueEvaluator = new IssueEvaluator(cwd, claudePath, githubAPI, projectsAPI);
 
     // Fetch issues
     console.log('\nFetching issues from GitHub...');
@@ -50,19 +65,8 @@ export async function evaluateCommand(options: EvaluateOptions): Promise<void> {
         })
       );
       console.log(chalk.green(`✓ Found ${issues.length} issue(s) to evaluate`));
-    } else if (config.project?.enabled) {
+    } else if (config.project?.enabled && projectsAPI) {
       // Use project status instead of labels when project integration is enabled
-      const { GitHubProjectsAPI } = await import('../../github/projects-api.js');
-      const projectId = await resolveProjectIdOrExit(config.github.owner, config.github.repo);
-      const projectsAPI = new GitHubProjectsAPI(projectId, config.project);
-
-      // Ensure autonomous view exists with all required fields
-      const claudeConfig = config.llms?.claude?.enabled ? {
-        cliPath: config.llms.claude.cliPath || 'claude',
-        cliArgs: config.llms.claude.cliArgs,
-      } : undefined;
-      await projectsAPI.ensureAutonomousView(claudeConfig);
-
       const readyItems = await projectsAPI.getReadyItems();
       const issueNumbers = readyItems.map(item => item.content.number).filter(Boolean) as number[];
 

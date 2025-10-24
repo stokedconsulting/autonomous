@@ -330,6 +330,91 @@ export class GitHubProjectsAPI implements ProjectAPI {
   }
 
   /**
+   * Update the Status field to a specific value (by name)
+   * This is used for evaluation statuses like "Evaluated" or "Needs more info"
+   */
+  async updateItemStatusByValue(projectItemId: string, statusValue: string): Promise<void> {
+    const statusFieldId = await this.getFieldId(this.config.fields.status.fieldName);
+
+    if (!statusFieldId) {
+      throw new Error(`Status field "${this.config.fields.status.fieldName}" not found in project`);
+    }
+
+    // Get option ID for the status value
+    const optionId = await this.getFieldOptionId(
+      this.config.fields.status.fieldName,
+      statusValue
+    );
+
+    if (!optionId) {
+      throw new Error(`Status option "${statusValue}" not found in project. Please add it to the Status field options.`);
+    }
+
+    const mutation = `
+      mutation {
+        updateProjectV2ItemFieldValue(input: {
+          projectId: "${this.projectId}"
+          itemId: "${projectItemId}"
+          fieldId: "${statusFieldId}"
+          value: {
+            singleSelectOptionId: "${optionId}"
+          }
+        }) {
+          projectV2Item {
+            id
+          }
+        }
+      }
+    `;
+
+    await this.graphql(mutation);
+  }
+
+  /**
+   * Get project item ID for an issue number
+   * Returns null if the issue is not in the project
+   */
+  async getProjectItemIdByIssue(issueNumber: number): Promise<string | null> {
+    const query = `
+      query {
+        node(id: "${this.projectId}") {
+          ... on ProjectV2 {
+            items(first: 100) {
+              nodes {
+                id
+                content {
+                  ... on Issue {
+                    number
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const result = await this.graphql<{
+      node: {
+        items: {
+          nodes: Array<{
+            id: string;
+            content: {
+              number: number;
+            } | null;
+          }>;
+        };
+      };
+    }>(query);
+
+    const item = result.node.items.nodes.find(
+      (node) => node.content && node.content.number === issueNumber
+    );
+
+    return item?.id || null;
+  }
+
+  /**
    * Query project items with filters
    */
   async queryItems(filters?: {
@@ -765,123 +850,125 @@ export class GitHubProjectsAPI implements ProjectAPI {
   }
 
   /**
-   * Create a project view via Claude + MCP browser automation
+   * Create a project view via Playwright browser automation
    */
   private async createViewViaBrowser(
     projectUrl: string,
     viewName: string,
-    claudeConfig?: { cliPath: string; cliArgs?: string[] }
+    _claudeConfig?: { cliPath: string; cliArgs?: string[] }
   ): Promise<void> {
-    const { execSync } = await import('child_process');
+    const { chromium } = await import('playwright');
     const readline = await import('readline');
-    const { promises: fs } = await import('fs');
-    const { tmpdir } = await import('os');
+    const { homedir } = await import('os');
     const { join } = await import('path');
 
-    // Build Claude CLI command with config
-    const claudePath = claudeConfig?.cliPath || 'claude';
-    const claudeArgs = claudeConfig?.cliArgs || [];
-    const claudeCommand = `${claudePath} ${claudeArgs.join(' ')} chat`.trim();
+    console.log('\n🤖 Using Playwright to create the view...\n');
 
-    console.log('\n🤖 Using Claude to create the view via browser automation...\n');
-
-    // Step 1: Navigate and check login status
-    // Note: Claude's MCP browser tools will reuse existing browser session if open
-    const checkLoginPrompt = `Please use MCP browser tools to navigate to ${projectUrl}.
-
-The browser tools will reuse any existing browser session if one is already open.
-
-Once you navigate to the page, check if you can see the GitHub project or if login is required.
-
-If you see a login page, respond with exactly: NEED LOGIN FROM USER
-If you can see the project content, respond with: READY TO CREATE VIEW`;
-
-    const checkLoginFile = join(tmpdir(), 'claude-check-login.txt');
-    await fs.writeFile(checkLoginFile, checkLoginPrompt, 'utf-8');
-
-    console.log('🔍 Opening project in browser (or reusing existing session)...');
-    let response = execSync(`cat "${checkLoginFile}" | ${claudeCommand}`, {
-      encoding: 'utf-8',
-      maxBuffer: 10 * 1024 * 1024
+    // Launch browser with user data dir to preserve login
+    const userDataDir = join(homedir(), '.autonomous', 'browser-profile');
+    const browser = await chromium.launchPersistentContext(userDataDir, {
+      headless: false,
+      viewport: { width: 1280, height: 720 },
     });
 
-    // Check if login needed
-    if (response.includes('NEED LOGIN FROM USER')) {
-      console.log('\n⏸️  GitHub login required!');
-      console.log('   A browser window should be open. Please log into GitHub there.');
-      console.log('   (If you\'re already logged in another tab, just switch to that profile)');
-      console.log('   Press ENTER when you\'re logged in and can see the project...\n');
+    const page = await browser.newPage();
 
-      // Wait for user
-      const rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout
-      });
+    try {
+      console.log('🔍 Navigating to project...');
+      await page.goto(projectUrl, { waitUntil: 'networkidle' });
 
-      await new Promise<void>((resolve) => {
-        rl.on('line', () => {
-          rl.close();
-          resolve();
+      // Check if login required
+      const isLoginPage = await page.locator('input[name="login"], input[name="password"]').count() > 0;
+
+      if (isLoginPage) {
+        console.log('\n⏸️  GitHub login required!');
+        console.log('   Please log into GitHub in the browser window.');
+        console.log('   Press ENTER when you\'re logged in and can see the project...\n');
+
+        const rl = readline.createInterface({
+          input: process.stdin,
+          output: process.stdout
         });
-      });
-    }
 
-    // Step 2: Create the view with ALL fields we read or write
-    console.log('🎨 Creating the view with all fields...');
+        await new Promise<void>((resolve) => {
+          rl.on('line', () => {
+            rl.close();
+            resolve();
+          });
+        });
 
-    const requiredFields = [
-      'Title',
-      'Assignees',
-      'Labels',
-      this.config.fields.status.fieldName,
-      this.config.fields.priority?.fieldName,
-      this.config.fields.size?.fieldName,
-      this.config.fields.sprint?.fieldName,
-      this.config.fields.assignedInstance?.fieldName,
-      'Area',  // Read by field mapper
-      'Work Type',  // Read by field mapper
-      'Target Date',
-      'Effort',
-      'Milestone',
-      'Repository',
-    ].filter(Boolean);
+        // Reload page after login
+        await page.reload({ waitUntil: 'networkidle' });
+      }
 
-    const createViewPrompt = `You should now be on the GitHub project page at ${projectUrl}.
+      console.log('🎨 Creating view with all fields...');
 
-Please create a new view called "${viewName}" with all the required fields by following these steps:
+      // Click the + button to create new view
+      const newViewButton = page.locator('button[aria-label*="New view"], button:has-text("New view"), [data-testid="new-view-button"]').first();
+      await newViewButton.click();
+      await page.waitForTimeout(500);
 
-1. Look for the view tabs at the top of the project (usually shows "View 1" or similar)
-2. Click the + button next to the tabs
-3. In the dialog that appears:
-   - Enter the name "${viewName}"
-   - Select "Table" layout
-4. Click "Create" or "Save"
-5. Once the view is created, you need to add these fields to the view:
-   ${requiredFields.map(f => `   - ${f}`).join('\n')}
+      // Enter view name
+      const nameInput = page.locator('input[placeholder*="View name"], input[name="name"]').first();
+      await nameInput.fill(viewName);
 
-   To add fields:
-   - Look for the "+" button in the table header or a "Fields" or "Customize" option
-   - Click it to open the field selector
-   - Select each of the fields listed above
-   - Make sure they're all visible in the table
+      // Select Table layout if prompted
+      const tableOption = page.locator('button:has-text("Table"), [role="radio"]:has-text("Table")').first();
+      if (await tableOption.count() > 0) {
+        await tableOption.click();
+      }
 
-Once all fields are added and visible, respond with: VIEW CREATED SUCCESSFULLY
+      // Click Create/Save
+      const createButton = page.locator('button:has-text("Create"), button:has-text("Save")').first();
+      await createButton.click();
+      await page.waitForTimeout(1000);
 
-If there are any errors, describe what went wrong.`;
+      console.log('✓ View created, now adding fields...');
 
-    const createViewFile = join(tmpdir(), 'claude-create-view.txt');
-    await fs.writeFile(createViewFile, createViewPrompt, 'utf-8');
+      // Add all required fields
+      const requiredFields = [
+        'Title',
+        'Assignees',
+        'Labels',
+        this.config.fields.status.fieldName,
+        this.config.fields.priority?.fieldName,
+        this.config.fields.size?.fieldName,
+        this.config.fields.sprint?.fieldName,
+        this.config.fields.assignedInstance?.fieldName,
+        'Area',
+        'Work Type',
+        'Target Date',
+        'Effort',
+        'Milestone',
+        'Repository',
+      ].filter(Boolean);
 
-    response = execSync(`cat "${createViewFile}" | ${claudeCommand}`, {
-      encoding: 'utf-8',
-      maxBuffer: 10 * 1024 * 1024
-    });
+      // Look for field customization button (+ or Fields button)
+      const fieldsButton = page.locator('button:has-text("Fields"), button[aria-label*="Fields"], button[aria-label*="column"]').first();
+      if (await fieldsButton.count() > 0) {
+        await fieldsButton.click();
+        await page.waitForTimeout(500);
 
-    if (response.includes('VIEW CREATED SUCCESSFULLY')) {
+        // Select each field
+        for (const field of requiredFields) {
+          const fieldCheckbox = page.locator(`[role="checkbox"]:near(:text("${field}")), label:has-text("${field}")`).first();
+          if (await fieldCheckbox.count() > 0) {
+            await fieldCheckbox.click();
+            await page.waitForTimeout(100);
+          }
+        }
+
+        // Close field selector
+        const closeButton = page.locator('button:has-text("Done"), button:has-text("Close"), button[aria-label="Close"]').first();
+        if (await closeButton.count() > 0) {
+          await closeButton.click();
+        }
+      }
+
       console.log('✓ View created successfully!\n');
-    } else {
-      console.log('⚠️  View creation response:', response);
-      throw new Error('View creation may have failed - please check the browser');
+
+    } finally {
+      await browser.close();
     }
   }
 

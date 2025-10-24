@@ -32,7 +32,9 @@
         "inProgressValue": "In Progress",
         "reviewValue": "In Review",
         "doneValue": "Done",
-        "blockedValue": "Blocked"
+        "blockedValue": "Blocked",
+        "evaluatedValue": "Evaluated",
+        "needsMoreInfoValue": "Needs more info"
       },
       "priority": {
         "fieldName": "Priority",
