@@ -330,7 +330,7 @@ export class Orchestrator {
 
     for (const provider of enabledLLMs) {
       const llmConfig = this.configManager.getLLMConfig(provider);
-      const activeCount = this.assignmentManager.getActiveAssignmentsCount(provider);
+      const activeCount = await this.assignmentManager.getActiveAssignmentsCount(provider);
       const available = llmConfig.maxConcurrentIssues - activeCount;
 
       if (available <= 0) {

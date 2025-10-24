@@ -280,9 +280,33 @@ export class AssignmentManager {
 
   /**
    * Get active assignments count for a provider
+   * If project API is available, syncs status from GitHub first
    */
-  getActiveAssignmentsCount(provider: LLMProvider): number {
+  async getActiveAssignmentsCount(provider: LLMProvider): Promise<number> {
     if (!this.data) return 0;
+
+    // If project API available, sync status from GitHub for each assignment
+    if (this.projectAPI) {
+      for (const assignment of this.data.assignments) {
+        if (assignment.llmProvider === provider && assignment.projectItemId) {
+          try {
+            const projectStatus = await this.projectAPI.getItemStatus(assignment.projectItemId);
+            // Update local status if it differs from project
+            if (projectStatus !== assignment.status) {
+              assignment.status = projectStatus;
+              assignment.lastActivity = new Date().toISOString();
+            }
+          } catch (error) {
+            // If can't fetch status, use cached value
+            this.logger?.warn(`Could not sync status for assignment ${assignment.id}: ${error}`);
+          }
+        }
+      }
+      // Save any status changes
+      await this.save();
+    }
+
+    // Count only assignments that are actually active (assigned or in-progress)
     return this.data.assignments.filter(
       (a) => a.llmProvider === provider && (a.status === 'assigned' || a.status === 'in-progress')
     ).length;
