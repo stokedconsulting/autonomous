@@ -257,12 +257,16 @@ export class ProjectAwarePrioritizer {
 
   /**
    * Filter issues by status (only include "ready" items)
+   * Includes: readyValues (Todo, Ready) + evaluatedValue (Evaluated)
    */
   filterReadyIssues(
     prioritizedIssues: PrioritizedIssue[],
     projectMetadataMap: Map<number, ProjectItemMetadata>
   ): PrioritizedIssue[] {
-    const readyStatuses = this.config.fields.status.readyValues;
+    const readyStatuses = [
+      ...this.config.fields.status.readyValues,
+      this.config.fields.status.evaluatedValue,
+    ];
 
     return prioritizedIssues.filter((issue) => {
       const metadata = projectMetadataMap.get(issue.issueNumber);
