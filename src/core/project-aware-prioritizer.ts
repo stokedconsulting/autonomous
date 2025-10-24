@@ -9,7 +9,7 @@
  */
 
 import { IssueEvaluation } from '../types/evaluation.js';
-import { ProjectItemMetadata, PrioritizationContext } from '../types/project.js';
+import { ProjectItemMetadata, PrioritizationContext, SprintFieldValue } from '../types/project.js';
 import { ProjectConfig } from '../types/config.js';
 import { ProjectFieldMapper } from '../github/project-field-mapper.js';
 
@@ -51,10 +51,8 @@ export class ProjectAwarePrioritizer {
       ? this.fieldMapper.getPriorityWeight(projectMetadata.priority)
       : 0;
 
-    // Sprint boost (0 or 10)
-    const sprintScore = projectMetadata && this.fieldMapper.isInCurrentSprint(projectMetadata.sprint)
-      ? 10
-      : 0;
+    // Sprint boost (0-15, with urgency multiplier)
+    const sprintScore = this.calculateSprintScore(projectMetadata?.sprint || null);
 
     // Size preference (0-10)
     const sizeScore = projectMetadata
@@ -150,6 +148,49 @@ export class ProjectAwarePrioritizer {
     ];
 
     return lines.join('\n');
+  }
+
+  /**
+   * Calculate sprint score with urgency multiplier
+   * Returns 0-20 based on current sprint and days remaining
+   */
+  private calculateSprintScore(sprint: SprintFieldValue | null): number {
+    if (!sprint) {
+      return 0; // Not in any sprint
+    }
+
+    // Check if in current sprint
+    const isInCurrentSprint = this.fieldMapper.isInCurrentSprint(sprint);
+
+    if (!isInCurrentSprint) {
+      // Check if in an upcoming sprint (lower priority)
+      const metadata = this.fieldMapper.getSprintMetadata(sprint);
+      if (metadata.isUpcoming) {
+        return 3; // Upcoming sprint items get some boost
+      }
+      return 0; // Past or no sprint
+    }
+
+    // In current sprint - calculate urgency multiplier
+    const metadata = this.fieldMapper.getSprintMetadata(sprint);
+    const daysRemaining = metadata.daysRemaining || metadata.duration;
+
+    // More urgent as sprint end approaches
+    // 10+ days remaining: 10 points
+    // 5-10 days: 11 points
+    // 1-5 days: 13 points
+    // Today or overdue: 15 points (extra boost)
+    if (daysRemaining <= 0) {
+      return 15; // Overdue - very urgent!
+    } else if (daysRemaining <= 1) {
+      return 14; // Due today/tomorrow - urgent
+    } else if (daysRemaining <= 5) {
+      return 13; // Due this week - high priority
+    } else if (daysRemaining <= 10) {
+      return 11; // Due soon - elevated priority
+    } else {
+      return 10; // In current sprint - normal boost
+    }
   }
 
   /**

@@ -11,6 +11,7 @@ import {
   ProjectItemMetadata,
   ProjectItemWithMetadata,
   SprintFieldValue,
+  SprintMetadata,
 } from '../types/project.js';
 
 export class ProjectFieldMapper {
@@ -180,11 +181,46 @@ export class ProjectFieldMapper {
 
     if (value && typeof value === 'object' && value.title && value.startDate) {
       return {
+        id: value.id || value.title, // Use ID if available, fallback to title
         title: value.title,
         startDate: value.startDate,
+        duration: value.duration || undefined,
       };
     }
 
     return null;
+  }
+
+  /**
+   * Get sprint metadata with current/upcoming/past status
+   */
+  getSprintMetadata(sprint: SprintFieldValue): SprintMetadata {
+    const startDate = new Date(sprint.startDate);
+    const duration = sprint.duration || 14; // Default to 2 weeks
+    const endDate = new Date(startDate);
+    endDate.setDate(endDate.getDate() + duration);
+
+    const now = new Date();
+    const isCurrent = now >= startDate && now <= endDate;
+    const isUpcoming = now < startDate;
+    const isPast = now > endDate;
+
+    let daysRemaining: number | undefined;
+    if (isCurrent) {
+      const timeRemaining = endDate.getTime() - now.getTime();
+      daysRemaining = Math.ceil(timeRemaining / (1000 * 60 * 60 * 24));
+    }
+
+    return {
+      id: sprint.id,
+      title: sprint.title,
+      startDate: sprint.startDate,
+      duration,
+      endDate: endDate.toISOString().split('T')[0],
+      isCurrent,
+      isUpcoming,
+      isPast,
+      daysRemaining,
+    };
   }
 }
