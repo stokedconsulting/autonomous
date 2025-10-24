@@ -36,7 +36,7 @@ const defaultLogger: Logger = {
 
 // Project API interface (to be implemented in Phase 1)
 export interface ProjectAPI {
-  getItemStatus(projectItemId: string): Promise<AssignmentStatus>;
+  getItemStatus(projectItemId: string): Promise<AssignmentStatus | null>;
   updateItemStatus(projectItemId: string, status: AssignmentStatus): Promise<void>;
   getProjectItemId(issueNumber: number): Promise<string | null>;
 }
@@ -291,8 +291,9 @@ export class AssignmentManager {
         if (assignment.llmProvider === provider && assignment.projectItemId) {
           try {
             const projectStatus = await this.projectAPI.getItemStatus(assignment.projectItemId);
-            // Update local status if it differs from project
-            if (projectStatus !== assignment.status) {
+            // Only update if status is mapped (not null) and differs from current
+            // Null means status is "Needs more info", "Evaluated", etc - don't count these
+            if (projectStatus !== null && projectStatus !== assignment.status) {
               assignment.status = projectStatus;
               assignment.lastActivity = new Date().toISOString();
             }
@@ -340,6 +341,11 @@ export class AssignmentManager {
     try {
       // Fetch current status from project
       const projectStatus = await this.projectAPI.getItemStatus(assignment.projectItemId);
+
+      // If status is unmapped (null), don't sync - keep local status
+      if (projectStatus === null) {
+        return assignment;
+      }
 
       // Detect status conflict
       if (assignment.status !== projectStatus) {
@@ -532,7 +538,8 @@ export class AssignmentManager {
       try {
         const projectStatus = await this.projectAPI.getItemStatus(assignment.projectItemId);
 
-        if (assignment.status !== projectStatus) {
+        // Skip unmapped statuses (Needs more info, Evaluated, etc)
+        if (projectStatus !== null && assignment.status !== projectStatus) {
           conflicts++;
           this.logger.warn(
             `Reconciling #${assignment.issueNumber}: ${assignment.status} → ${projectStatus}`

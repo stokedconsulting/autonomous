@@ -56,6 +56,8 @@ const STATUS_MAPPING: Record<AssignmentStatus, string> = {
 
 /**
  * Reverse mapping for reading from project
+ * Note: "Needs more info" and "Evaluated" are intentionally omitted
+ * as they don't map to active assignment statuses
  */
 const REVERSE_STATUS_MAPPING: Record<string, AssignmentStatus> = {
   'Backlog': 'assigned',           // Backlog items treated as ready to assign
@@ -244,8 +246,9 @@ export class GitHubProjectsAPI implements ProjectAPI {
 
   /**
    * Get the Status field value for a project item
+   * Returns null if status is not mapped (e.g., "Needs more info", "Evaluated")
    */
-  async getItemStatus(projectItemId: string): Promise<AssignmentStatus> {
+  async getItemStatus(projectItemId: string): Promise<AssignmentStatus | null> {
     const statusFieldId = await this.getFieldId(this.config.fields.status.fieldName);
 
     if (!statusFieldId) {
@@ -282,7 +285,8 @@ export class GitHubProjectsAPI implements ProjectAPI {
     }
 
     // Map project status to AssignmentStatus
-    return REVERSE_STATUS_MAPPING[statusValue] || 'assigned';
+    // Return null for unmapped statuses (Needs more info, Evaluated, etc)
+    return REVERSE_STATUS_MAPPING[statusValue] || null;
   }
 
   /**
