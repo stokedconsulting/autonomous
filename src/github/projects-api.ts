@@ -48,8 +48,8 @@ export interface ProjectItemsQueryResult {
  * Maps autonomous AssignmentStatus to project Status field values
  */
 const STATUS_MAPPING: Record<AssignmentStatus, string> = {
-  'assigned': 'Ready',             // Just assigned, ready to work
-  'in-progress': 'In progress',    // LLM is working
+  'assigned': 'Todo',             // Just assigned, ready to work
+  'in-progress': 'In Progress',    // LLM is working
   'llm-complete': 'In review',     // LLM done, PR created, awaiting review
   'merged': 'Done',                // PR merged
 };
@@ -58,11 +58,11 @@ const STATUS_MAPPING: Record<AssignmentStatus, string> = {
  * Reverse mapping for reading from project
  *
  * IMPORTANT: This is ONLY for syncing status of ALREADY ASSIGNED issues.
- * Pre-assignment statuses (Todo, Ready, Backlog, Evaluated) are NOT included
+ * Pre-assignment statuses (Todo, Evaluated) are NOT included
  * because they represent "assignable" issues, not assigned ones.
  */
 const REVERSE_STATUS_MAPPING: Record<string, AssignmentStatus> = {
-  'In progress': 'in-progress',    // Actively being worked on by LLM
+  'In Progress': 'in-progress',    // Actively being worked on by LLM
   'In review': 'llm-complete',     // LLM done, PR created, awaiting review
   'Done': 'merged',                // PR merged, completed
 };

@@ -324,10 +324,12 @@ export class Orchestrator {
     // If project API is available, filter by status using BATCH query
     if (this.projectsAPI) {
       try {
-        // Get ALL project items in ONE query with statuses that map to 'assigned'
-        // These are: Todo, Ready, Backlog, Evaluated
+        // Get ALL project items in ONE query with assignable statuses from config
+        const config = this.configManager.getConfig();
+        const readyStatuses = config.project?.fields.status.readyValues || [];
+
         const result = await this.projectsAPI.queryItems({
-          status: ['Todo', 'Ready', 'Backlog', 'Evaluated'],
+          status: readyStatuses,
           limit: 100,
         });
 
