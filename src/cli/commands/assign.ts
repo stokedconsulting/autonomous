@@ -13,6 +13,7 @@ import { GitHubProjectsAPI } from '../../github/projects-api.js';
 import { PromptBuilder } from '../../llm/prompt-builder.js';
 import { ClaudeAdapter } from '../../llm/claude-adapter.js';
 import { getGitHubToken } from '../../utils/github-token.js';
+import { resolveProjectIdOrExit } from '../../github/project-resolver.js';
 import { join } from 'path';
 import { promises as fs } from 'fs';
 
@@ -48,9 +49,8 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
     // Initialize project API if enabled
     let projectsAPI: GitHubProjectsAPI | null = null;
     if (config.project?.enabled) {
-      const projectId = process.env.GITHUB_PROJECT_ID || 'PVT_kwDOBW_6Ns4BGTch'; // TODO: Store in config
+      const projectId = await resolveProjectIdOrExit(config.github.owner, config.github.repo);
       projectsAPI = new GitHubProjectsAPI(projectId, config.project);
-      console.log(chalk.gray('✓ GitHub Projects integration enabled'));
     }
 
     const assignmentManager = new AssignmentManager(cwd, {

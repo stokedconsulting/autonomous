@@ -15,6 +15,7 @@ import { ClaudeAdapter } from '../llm/claude-adapter.js';
 import { PromptBuilder } from '../llm/prompt-builder.js';
 import { LLMProvider, Assignment, Issue } from '../types/index.js';
 import { getGitHubToken } from '../utils/github-token.js';
+import { resolveProjectId } from '../github/project-resolver.js';
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import chalk from 'chalk';
@@ -68,17 +69,21 @@ export class Orchestrator {
 
     // Initialize GitHub Projects v2 integration if enabled
     if (config.project?.enabled) {
-      const projectId = process.env.GITHUB_PROJECT_ID || 'PVT_kwDOBW_6Ns4BGTch'; // TODO: Store in config
-      this.projectsAPI = new GitHubProjectsAPI(projectId, config.project);
-      this.fieldMapper = new ProjectFieldMapper(this.projectsAPI, config.project);
-      this.prioritizer = new ProjectAwarePrioritizer(config.project, this.fieldMapper);
+      const projectId = await resolveProjectId(config.github.owner, config.github.repo, false);
+      if (projectId) {
+        this.projectsAPI = new GitHubProjectsAPI(projectId, config.project);
+        this.fieldMapper = new ProjectFieldMapper(this.projectsAPI, config.project);
+        this.prioritizer = new ProjectAwarePrioritizer(config.project, this.fieldMapper);
 
-      // Re-initialize assignment manager with project API for conflict detection
-      this.assignmentManager = new AssignmentManager(this.projectPath, {
-        projectAPI: this.projectsAPI,
-      });
+        // Re-initialize assignment manager with project API for conflict detection
+        this.assignmentManager = new AssignmentManager(this.projectPath, {
+          projectAPI: this.projectsAPI,
+        });
 
-      console.log(chalk.green('✓ GitHub Projects v2 integration enabled'));
+        console.log(chalk.green('✓ GitHub Projects v2 integration enabled'));
+      } else {
+        console.log(chalk.yellow('⚠ Project integration enabled but no project found'));
+      }
     }
 
     // Verify git repository

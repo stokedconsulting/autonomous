@@ -17,6 +17,7 @@ import { ProjectFieldMapper } from '../../github/project-field-mapper.js';
 import { ProjectAwarePrioritizer } from '../../core/project-aware-prioritizer.js';
 import { IssueEvaluator } from '../../core/issue-evaluator.js';
 import { AssignmentManager } from '../../core/assignment-manager.js';
+import { resolveProjectIdOrExit } from '../../github/project-resolver.js';
 
 interface ProjectStatusOptions {
   json?: boolean;
@@ -163,8 +164,8 @@ export async function projectStatusCommand(options: ProjectStatusOptions): Promi
       process.exit(1);
     }
 
-    // Get project ID from environment or config
-    const projectId = process.env.GITHUB_PROJECT_ID || 'PVT_kwDOBW_6Ns4BGTch'; // TODO: Store in config
+    // Get project ID with auto-discovery
+    const projectId = await resolveProjectIdOrExit(config.github.owner, config.github.repo);
 
     console.log(chalk.blue('📊 Project Status\n'));
 
@@ -285,8 +286,8 @@ export async function projectListReadyCommand(options: ProjectListReadyOptions):
       process.exit(1);
     }
 
-    // Get project ID
-    const projectId = process.env.GITHUB_PROJECT_ID || 'PVT_kwDOBW_6Ns4BGTch'; // TODO: Store in config
+    // Get project ID with auto-discovery
+    const projectId = await resolveProjectIdOrExit(config.github.owner, config.github.repo);
 
     const projectsAPI = new GitHubProjectsAPI(projectId, config.project);
     const fieldMapper = new ProjectFieldMapper(projectsAPI, config.project);

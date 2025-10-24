@@ -7,6 +7,7 @@ import { ConfigManager } from '../../core/config-manager.js';
 import { IssueEvaluator } from '../../core/issue-evaluator.js';
 import { GitHubAPI } from '../../github/api.js';
 import { getGitHubToken } from '../../utils/github-token.js';
+import { resolveProjectIdOrExit } from '../../github/project-resolver.js';
 
 interface EvaluateOptions {
   force?: boolean;
@@ -52,7 +53,7 @@ export async function evaluateCommand(options: EvaluateOptions): Promise<void> {
     } else if (config.project?.enabled) {
       // Use project status instead of labels when project integration is enabled
       const { GitHubProjectsAPI } = await import('../../github/projects-api.js');
-      const projectId = process.env.GITHUB_PROJECT_ID || 'PVT_kwDOBW_6Ns4BGTch';
+      const projectId = await resolveProjectIdOrExit(config.github.owner, config.github.repo);
       const projectsAPI = new GitHubProjectsAPI(projectId, config.project);
 
       const readyItems = await projectsAPI.getReadyItems();
