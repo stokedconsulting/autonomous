@@ -53,7 +53,7 @@ After setting up the project fields via the GitHub UI, apply this metadata to ea
 - **Effort Estimate**: 4 hours
 - **Parent**: #1
 
-### #6 - Create 'autonomous project init' command
+### #6 - Create 'auto project init' command
 - **Status**: Ready
 - **Priority**: High
 - **Size**: M
@@ -63,7 +63,7 @@ After setting up the project fields via the GitHub UI, apply this metadata to ea
 - **Effort Estimate**: 6 hours
 - **Parent**: #1
 
-### #7 - Create 'autonomous project status' command
+### #7 - Create 'auto project status' command
 - **Status**: Ready
 - **Priority**: Medium
 - **Size**: S
@@ -73,7 +73,7 @@ After setting up the project fields via the GitHub UI, apply this metadata to ea
 - **Effort Estimate**: 4 hours
 - **Parent**: #1
 
-### #8 - Create 'autonomous project list-ready' command
+### #8 - Create 'auto project list-ready' command
 - **Status**: Ready
 - **Priority**: Medium
 - **Size**: S

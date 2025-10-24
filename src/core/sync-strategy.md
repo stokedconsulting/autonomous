@@ -45,7 +45,7 @@ When conflicts occur (local state differs from project state):
 | **Status (SYNCED)** |
 | `status` | GitHub Projects | Synced | Read from project, written back on changes |
 | **Timestamps (LOCAL)** |
-| `assignedAt` | Local | Local-only | When autonomous assigned this |
+| `assignedAt` | Local | Local-only | When auto assigned this |
 | `startedAt` | Local | Local-only | When work started |
 | `lastActivity` | Local | Local-only | Last autonomous activity |
 | `completedAt` | Local | Local-only | When LLM marked complete |

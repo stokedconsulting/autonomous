@@ -222,9 +222,9 @@ Phase 0 establishes the **data model** and **conflict detection infrastructure**
 2. **#3**: Add project field mapping and metadata reading
 3. **#4**: Implement project items query with filters
 4. **#5**: Add project configuration to .autonomous-config.json
-5. **#6**: Create `autonomous project init` command
-6. **#7**: Create `autonomous project status` command
-7. **#8**: Create `autonomous project list-ready` command
+5. **#6**: Create `auto project init` command
+6. **#7**: Create `auto project status` command
+7. **#8**: Create `auto project list-ready` command
 
 ### Phase 1 Will Wire Up:
 - `ProjectAPI` interface → real GraphQL implementation

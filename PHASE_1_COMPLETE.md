@@ -96,10 +96,10 @@ filterBlockedIssues(prioritizedIssues, projectMetadataMap): PrioritizedIssue[]
 
 **Three New Commands**:
 
-#### `autonomous project init`
+#### `auto project init`
 Initialize project integration:
 ```bash
-autonomous project init --project-number 5 --org
+auto project init --project-number 5 --org
 ```
 
 Features:
@@ -108,10 +108,10 @@ Features:
 - Validates configuration
 - Shows field options
 
-#### `autonomous project status`
+#### `auto project status`
 Show project and local assignment status:
 ```bash
-autonomous project status [--json] [--verbose]
+auto project status [--json] [--verbose]
 ```
 
 Features:
@@ -120,10 +120,10 @@ Features:
 - Compares project vs local assignments
 - Optional verbose mode with item details
 
-#### `autonomous project list-ready`
+#### `auto project list-ready`
 List ready items with hybrid prioritization:
 ```bash
-autonomous project list-ready [--limit 10] [--json] [--verbose]
+auto project list-ready [--limit 10] [--json] [--verbose]
 ```
 
 Features:
@@ -247,7 +247,7 @@ All TypeScript compilation successful!
 
 - [ ] **Project Init Command**
   ```bash
-  autonomous project init --project-number 5 --org
+  auto project init --project-number 5 --org
   ```
   - Verify project is found
   - Verify fields are listed
@@ -255,9 +255,9 @@ All TypeScript compilation successful!
 
 - [ ] **Project Status Command**
   ```bash
-  autonomous project status
-  autonomous project status --verbose
-  autonomous project status --json
+  auto project status
+  auto project status --verbose
+  auto project status --json
   ```
   - Verify items grouped by status
   - Verify ready count shown
@@ -265,9 +265,9 @@ All TypeScript compilation successful!
 
 - [ ] **Project List-Ready Command**
   ```bash
-  autonomous project list-ready
-  autonomous project list-ready --limit 5
-  autonomous project list-ready --verbose
+  auto project list-ready
+  auto project list-ready --limit 5
+  auto project list-ready --verbose
   ```
   - Verify hybrid scores calculated
   - Verify items sorted correctly
@@ -293,10 +293,10 @@ Test with real project:
 export GITHUB_PROJECT_ID="PVT_kwDOBW_6Ns4BGTch"
 
 # 2. Test project status
-autonomous project status
+auto project status
 
 # 3. Test list-ready
-autonomous project list-ready --verbose
+auto project list-ready --verbose
 
 # 4. Compare with project board
 # Visit: https://github.com/orgs/stokedconsulting/projects/5
@@ -318,9 +318,9 @@ autonomous project list-ready --verbose
 - Size preference
 
 ✅ **CLI Commands**:
-- `autonomous project init`
-- `autonomous project status`
-- `autonomous project list-ready`
+- `auto project init`
+- `auto project status`
+- `auto project list-ready`
 
 ✅ **Conflict Detection Ready**:
 - AssignmentManager has conflict detection methods
@@ -330,7 +330,7 @@ autonomous project list-ready --verbose
 
 ### Phase 2: Hybrid Prioritization (MOSTLY DONE ✅)
 The ProjectAwarePrioritizer is already implemented! Remaining tasks:
-- [ ] Integrate into `autonomous start` workflow
+- [ ] Integrate into `auto start` workflow
 - [ ] Use hybrid scores when assigning issues
 - [ ] Add `--use-project-priority` flag to start command
 
@@ -376,6 +376,6 @@ Infrastructure is ready, just need to:
 
 **Build Status**: ✅ **PASSING**
 
-**Next Action**: Integrate hybrid prioritization into `autonomous start` command, then implement status write-back for Phase 3
+**Next Action**: Integrate hybrid prioritization into `auto start` command, then implement status write-back for Phase 3
 
 🎉 **Phase 1 Implementation Complete!**

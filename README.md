@@ -26,10 +26,10 @@ export GITHUB_TOKEN=your_github_token_here
 cd my-project
 
 # That's it! Just run:
-autonomous
+auto
 ```
 
-On first run, `autonomous` will automatically:
+On first run, `auto` will automatically:
 - ✓ Detect your GitHub repository from git remote
 - ✓ Detect Claude CLI path (even if it's a shell alias)
 - ✓ Create `.autonomous-config.json`
@@ -99,27 +99,27 @@ Sibling Directories (Worktrees)
 
 ## Commands
 
-### `autonomous` or `autonomous start`
+### `auto` or `auto start`
 Start autonomous mode and begin processing issues. Running `autonomous` without any command defaults to `start`.
 
 **Options:**
 - `-d, --dry-run` - Simulate without actually starting LLMs
 - `-v, --verbose` - Enable verbose logging
 
-### `autonomous stop`
+### `auto stop`
 Stop all running LLM instances and save state.
 
 **Options:**
 - `-f, --force` - Force stop all instances
 
-### `autonomous status`
+### `auto status`
 View current assignments and their status.
 
 **Options:**
 - `-j, --json` - Output as JSON
 - `-w, --watch` - Watch mode - continuously update status
 
-### `autonomous config init`
+### `auto config init`
 Initialize configuration in the current project. Auto-detects GitHub owner/repo from git remote.
 
 **Options:**
@@ -127,7 +127,7 @@ Initialize configuration in the current project. Auto-detects GitHub owner/repo 
 - `--github-repo <repo>` - Override detected GitHub repo
 - `--interactive` - Interactive configuration setup
 
-### `autonomous config add-llm <provider>`
+### `auto config add-llm <provider>`
 Add and configure an LLM provider (claude, gemini, codex).
 
 **Options:**
@@ -136,13 +136,13 @@ Add and configure an LLM provider (claude, gemini, codex).
 - `--max-concurrent <number>` - Maximum concurrent issues
 - `--enable-hooks` - Enable hooks support (recommended for Claude)
 
-### `autonomous config show`
+### `auto config show`
 Display current configuration.
 
 **Options:**
 - `-j, --json` - Output as JSON
 
-### `autonomous config validate`
+### `auto config validate`
 Validate current configuration.
 
 ## LLM Support
@@ -207,10 +207,10 @@ export GITHUB_TOKEN=your_token
 autonomous
 
 # View what's happening
-autonomous status
+auto status
 
 # Watch status in real-time
-autonomous status --watch
+auto status --watch
 ```
 
 ### Manual Configuration (Optional)
@@ -219,22 +219,22 @@ If you prefer to configure manually or override auto-detection:
 
 ```bash
 # Initialize with explicit owner/repo
-autonomous config init --github-owner myorg --github-repo myrepo
+auto config init --github-owner myorg --github-repo myrepo
 
 # Add Claude with custom CLI path and args
-autonomous config add-llm claude --cli-path /usr/local/bin/claude --enable-hooks
+auto config add-llm claude --cli-path /usr/local/bin/claude --enable-hooks
 
 # Add Claude with debug flags
-autonomous config add-llm claude --cli-args "--debug hooks" --enable-hooks
+auto config add-llm claude --cli-args "--debug hooks" --enable-hooks
 
 # Set maximum concurrent issues
-autonomous config add-llm claude --max-concurrent 2
+auto config add-llm claude --max-concurrent 2
 
 # View configuration
-autonomous config show
+auto config show
 
 # Validate configuration
-autonomous config validate
+auto config validate
 
 # Then start
 autonomous
@@ -267,7 +267,7 @@ Configuring Claude with hooks enabled...
 ✓ Configuration created and Claude enabled
 
 Configuration saved to .autonomous-config.json
-You can customize settings with: autonomous config show
+You can customize settings with: auto config show
 
 Loading configuration...
 ✓ Configuration loaded

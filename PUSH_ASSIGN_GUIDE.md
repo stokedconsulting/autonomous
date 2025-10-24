@@ -2,7 +2,7 @@
 
 This guide covers the new `push` and `assign` commands and their customization requirements.
 
-## `autonomous push` Command
+## `auto push` Command
 
 Automatically generates changesets, creates conventional commit messages, commits, and pushes changes using Claude AI.
 
@@ -10,10 +10,10 @@ Automatically generates changesets, creates conventional commit messages, commit
 
 ```bash
 # Basic push (changeset + commit + push)
-autonomous push
+auto push
 
 # Push and create/update pull request
-autonomous push --pr
+auto push --pr
 ```
 
 ### What It Does
@@ -140,7 +140,7 @@ Controls whether to use conventional commit format:
 # ...
 
 # Push everything with a PR
-autonomous push --pr
+auto push --pr
 
 # Output:
 # 🚀 Autonomous Push
@@ -168,7 +168,7 @@ autonomous push --pr
 
 ---
 
-## `autonomous assign` Command
+## `auto assign` Command
 
 Manually assign a specific GitHub issue to autonomous processing.
 
@@ -176,13 +176,13 @@ Manually assign a specific GitHub issue to autonomous processing.
 
 ```bash
 # Assign issue #42
-autonomous assign 42
+auto assign 42
 
 # Assign without evaluation (faster, but risky)
-autonomous assign 42 --skip-eval
+auto assign 42 --skip-eval
 
 # Assign with verbose output
-autonomous assign 42 --verbose
+auto assign 42 --verbose
 ```
 
 ### What It Does
@@ -230,7 +230,7 @@ Uses the same `.autonomous-config.json` settings:
 ### Example Output
 
 ```bash
-$ autonomous assign 30
+$ auto assign 30
 
 🎯 Assigning Issue #30
 
@@ -260,14 +260,14 @@ Instance ID: claude-abc123
 
 📊 Monitor progress:
   tail -f .autonomous/output-claude-abc123.log
-  autonomous status
+  auto status
 ```
 
 ### Monitoring Assigned Work
 
 ```bash
 # Check all assignments
-autonomous status
+auto status
 
 # Watch logs in real-time
 tail -f .autonomous/output-claude-{instanceId}.log
@@ -293,7 +293,7 @@ When Claude completes work on an issue, the autonomous system can automatically 
 
 ### Assign Integration
 
-The main `autonomous start` command uses the same assignment logic internally when automatically processing issues.
+The main `auto start` command uses the same assignment logic internally when automatically processing issues.
 
 ---
 
@@ -304,7 +304,7 @@ The main `autonomous start` command uses the same assignment logic internally wh
 **Issue**: "Claude CLI not found"
 ```bash
 # Solution: Ensure Claude is in PATH or configure explicitly
-autonomous config add-llm claude --cli-path /full/path/to/claude
+auto config add-llm claude --cli-path /full/path/to/claude
 ```
 
 **Issue**: "No impacted packages detected"
@@ -332,7 +332,7 @@ export GITHUB_TOKEN=ghp_your_token_here
 **Issue**: "Issue #X is already assigned"
 ```bash
 # Solution: Check status and stop if needed
-autonomous status
+auto status
 autonomous stop  # If you want to reassign
 ```
 

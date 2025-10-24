@@ -91,7 +91,7 @@ Once Phase 1 is implemented:
 cp .autonomous-config.example.json .autonomous-config.json
 
 # Start autonomous development
-autonomous start
+auto start
 # → Will automatically pick #2 (highest priority Ready item)
 ```
 

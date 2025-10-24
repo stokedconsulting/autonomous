@@ -96,7 +96,7 @@ if (this.projectsAPI) {
 4. updateStatusWithSync() called:
    a. Updates local status
    b. Calls projectAPI.updateItemStatus()
-   c. Maps autonomous status → project status
+   c. Maps auto status → project status
    d. Updates project field via GraphQL
 5. User sees status change in project board
 ```
@@ -173,9 +173,9 @@ const REVERSE_STATUS_MAPPING: Record<string, AssignmentStatus> = {
 - Graceful degradation
 
 ✅ **CLI Integration**:
-- `autonomous start` uses hybrid prioritization
-- `autonomous assign <number>` syncs to project
-- `autonomous project list-ready` shows hybrid scores
+- `auto start` uses hybrid prioritization
+- `auto assign <number>` syncs to project
+- `auto project list-ready` shows hybrid scores
 - All commands work with or without project enabled
 
 ### Configuration
@@ -247,7 +247,7 @@ $ npm run build
   ```bash
   # Enable project in config
   # Set GITHUB_PROJECT_ID
-  autonomous start --verbose
+  auto start --verbose
   ```
   - Verify "🎯 Calculating hybrid priorities" message
   - Verify hybrid scores displayed
@@ -256,7 +256,7 @@ $ npm run build
 
 - [ ] **Status Sync on Assignment**
   ```bash
-  autonomous assign 2
+  auto assign 2
   ```
   - Verify "✓ Linked to project" message
   - Check project board: issue #2 should be "In Progress"
@@ -265,7 +265,7 @@ $ npm run build
 - [ ] **Status Conflict Detection**
   ```bash
   # Manually change status in project to "Blocked"
-  autonomous project status
+  auto project status
   ```
   - Verify conflict detected and logged
   - Verify local status updated to match project
@@ -273,7 +273,7 @@ $ npm run build
 - [ ] **Graceful Degradation**
   ```bash
   # Disable project integration
-  autonomous start
+  auto start
   ```
   - Verify falls back to AI-only prioritization
   - Verify "📊 AI Priority Ranking" displayed

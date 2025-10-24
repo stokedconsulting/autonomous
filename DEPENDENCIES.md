@@ -8,10 +8,10 @@ For a new repository, simply run:
 
 ```bash
 # Initialize configuration
-autonomous config init
+auto config init
 
 # Check and install dependencies
-autonomous setup
+auto setup
 ```
 
 The `setup` command will:
@@ -46,7 +46,7 @@ These must be installed manually (cannot be auto-installed):
 - **Install**: Visit https://claude.ai/download
 - **Configure**:
   ```bash
-  autonomous config add-llm claude --cli-path /path/to/claude
+  auto config add-llm claude --cli-path /path/to/claude
   ```
 
 ### 3. **Node.js & Package Manager**
@@ -75,9 +75,9 @@ These can be auto-installed or are only needed for specific commands:
 
 ### 1. **@changesets/cli** (Optional, Auto-installable)
 
-- **Required for**: `autonomous push` command (changeset generation)
+- **Required for**: `auto push` command (changeset generation)
 - **When needed**: Only if your repo uses changesets for versioning
-- **Auto-install**: Run `autonomous setup` - it will prompt you
+- **Auto-install**: Run `auto setup` - it will prompt you
 - **Manual install**:
   ```bash
   # Using pnpm
@@ -97,7 +97,7 @@ These can be auto-installed or are only needed for specific commands:
 
 ### 2. **GitHub CLI (gh)** (Optional, Manual install)
 
-- **Required for**: `autonomous push --pr` (PR creation/management)
+- **Required for**: `auto push --pr` (PR creation/management)
 - **Check**: `gh --version`
 - **Install**:
   ```bash
@@ -113,7 +113,7 @@ These can be auto-installed or are only needed for specific commands:
   gh auth login
   ```
 
-**Note**: If gh is not installed, `autonomous push --pr` will warn you but push will still work.
+**Note**: If gh is not installed, `auto push --pr` will warn you but push will still work.
 
 ---
 
@@ -122,7 +122,7 @@ These can be auto-installed or are only needed for specific commands:
 Check the status of all dependencies:
 
 ```bash
-autonomous setup
+auto setup
 ```
 
 **Output example:**
@@ -154,29 +154,29 @@ Optional:
 
 ## Per-Command Dependencies
 
-### `autonomous start`
+### `auto start`
 - ✅ Git
 - ✅ Claude CLI
 - ✅ GITHUB_TOKEN environment variable
 
-### `autonomous assign <issue>`
+### `auto assign <issue>`
 - ✅ Git
 - ✅ Claude CLI
 - ✅ GITHUB_TOKEN environment variable
 
-### `autonomous push`
+### `auto push`
 - ✅ Git
 - ✅ Claude CLI
 - ⚠️ @changesets/cli (if using changesets)
 
-### `autonomous push --pr`
+### `auto push --pr`
 - ✅ Git
 - ✅ Claude CLI
 - ⚠️ @changesets/cli (if using changesets)
 - ⚠️ GitHub CLI (gh)
 - ✅ GITHUB_TOKEN environment variable (for gh auth)
 
-### `autonomous status`
+### `auto status`
 - ✅ Git
 - (No other dependencies)
 
@@ -228,13 +228,13 @@ source ~/.zshrc
 cd /path/to/your/repo
 
 # 2. Initialize autonomous (auto-detects GitHub repo)
-autonomous config init
+auto config init
 
 # 3. Check and install dependencies
-autonomous setup
+auto setup
 
 # 4. Start using autonomous
-autonomous start --verbose
+auto start --verbose
 ```
 
 ### Workflow 2: Existing Repository
@@ -244,13 +244,13 @@ autonomous start --verbose
 cd /path/to/your/repo
 
 # 2. Check dependencies
-autonomous setup
+auto setup
 
 # 3. Install any missing dependencies manually
 # (follow the instructions from setup output)
 
 # 4. Start using autonomous
-autonomous start
+auto start
 ```
 
 ### Workflow 3: Manual Setup
@@ -268,16 +268,16 @@ pnpm add -D @changesets/cli
 pnpm changeset init
 
 # 4. Initialize autonomous
-autonomous config init
+auto config init
 
 # 5. Configure Claude
-autonomous config add-llm claude --cli-path $(which claude)
+auto config add-llm claude --cli-path $(which claude)
 
 # 6. Set GitHub token
 export GITHUB_TOKEN=ghp_your_token_here
 
 # 7. Start
-autonomous start
+auto start
 ```
 
 ---
@@ -294,7 +294,7 @@ autonomous start
 which claude
 
 # Configure explicitly
-autonomous config add-llm claude --cli-path /full/path/to/claude
+auto config add-llm claude --cli-path /full/path/to/claude
 
 # Or if using alias, find actual path
 type claude  # Shows if it's aliased
@@ -323,7 +323,7 @@ curl -H "Authorization: token $GITHUB_TOKEN" https://api.github.com/user
 **Solutions**:
 ```bash
 # Run setup to auto-install
-autonomous setup
+auto setup
 
 # Or manually install
 pnpm add -D @changesets/cli
@@ -343,7 +343,7 @@ brew install gh
 gh auth login
 
 # Or use push without --pr flag
-autonomous push  # Without PR creation
+auto push  # Without PR creation
 ```
 
 ---
@@ -371,11 +371,11 @@ Use this checklist when setting up autonomous in a new repository:
 - [ ] Package manager (pnpm/npm/yarn) installed
 - [ ] Claude CLI installed and in PATH
 - [ ] GitHub token created and set
-- [ ] Run `autonomous config init`
-- [ ] Run `autonomous setup`
+- [ ] Run `auto config init`
+- [ ] Run `auto setup`
 - [ ] Install any missing optional dependencies
 - [ ] Customize `.autonomous-config.json` scope map
-- [ ] Test with `autonomous start --verbose`
+- [ ] Test with `auto start --verbose`
 
 ---
 
@@ -394,7 +394,7 @@ brew upgrade gh
 # Visit https://claude.ai/download for latest version
 
 # Check current versions
-autonomous setup
+auto setup
 ```
 
 ---
@@ -438,11 +438,11 @@ For CI environments, ensure:
 1. ✅ Git
 2. ✅ Claude CLI
 3. ✅ GitHub token
-4. ✅ Run `autonomous config init`
-5. ✅ Run `autonomous setup`
+4. ✅ Run `auto config init`
+5. ✅ Run `auto setup`
 
 **For full functionality:**
-- Add `@changesets/cli` (via `autonomous setup`)
+- Add `@changesets/cli` (via `auto setup`)
 - Install `gh` CLI (for PR management)
 - Customize scope maps in config
 

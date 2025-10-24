@@ -182,7 +182,7 @@ Once fields are configured, add this to `.autonomous-config.json`:
 
 Then run:
 ```bash
-autonomous project init
+auto project init
 ```
 
 ## 📋 Current Sprint 1 Tasks
@@ -212,7 +212,7 @@ Once setup is complete, autonomous will:
 Start working:
 ```bash
 cd /Users/stoked/work/anonomous/autonomous
-autonomous start
+auto start
 ```
 
 This will automatically select the highest-priority ready task from Sprint 1!

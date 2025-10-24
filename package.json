@@ -4,7 +4,7 @@
   "description": "Autonomous LLM management CLI for coordinating Claude, Gemini, and Codex to work on GitHub issues",
   "main": "dist/index.js",
   "bin": {
-    "autonomous": "./dist/cli/index.js"
+    "auto": "./dist/cli/index.js"
   },
   "scripts": {
     "build": "tsc",

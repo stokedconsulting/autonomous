@@ -124,13 +124,13 @@ Once configured, you can:
 
 ```bash
 # See project status
-autonomous project status
+auto project status
 
 # List ready items
-autonomous project list-ready
+auto project list-ready
 
 # Start working (will pick highest priority Ready item)
-autonomous start
+auto start
 ```
 
 Note: The `project` commands don't exist yet - they'll be created in Phase 1!
@@ -156,7 +156,7 @@ The project is fully configured and ready for Phase 1 implementation to begin.
 **Next command to run:**
 ```bash
 # Once Phase 1 is complete, this will work:
-autonomous start
+auto start
 # → Will automatically pick issue #2 (highest priority in Sprint 1)
 ```
 

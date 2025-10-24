@@ -70,7 +70,7 @@ Configure how many concurrent instances you want per LLM provider:
 
 ### Assignment Flow
 
-1. **User runs**: `autonomous assign 123`
+1. **User runs**: `auto assign 123`
 2. **System checks**: Available slots for the LLM provider
 3. **System assigns**: Next available slot (e.g., `claude-1`)
 4. **System updates**:
@@ -185,7 +185,7 @@ GitHub issue assignees only support individual user accounts, not teams. Adding 
 1. Check field name matches configuration exactly (case-sensitive)
 2. Verify field type is TEXT or SINGLE_SELECT
 3. Check that project integration is enabled
-4. Run `autonomous project status --verbose` to see field details
+4. Run `auto project status --verbose` to see field details
 
 ### No available slots
 
