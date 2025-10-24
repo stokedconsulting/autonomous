@@ -360,6 +360,21 @@ export class Orchestrator {
 
       if (available <= 0) {
         console.log(chalk.gray(`${provider}: at capacity (${activeCount}/${llmConfig.maxConcurrentIssues})`));
+
+        // Show which issues are consuming capacity
+        const activeAssignments = this.assignmentManager.getAssignmentsByProvider(provider)
+          .filter(a => a.status === 'assigned' || a.status === 'in-progress');
+
+        if (activeAssignments.length > 0) {
+          console.log(chalk.gray(`  Active assignments:`));
+          for (const assignment of activeAssignments) {
+            const timeAgo = this.getTimeAgo(assignment.assignedAt);
+            console.log(chalk.gray(`    #${assignment.issueNumber} (${assignment.status}) - started ${timeAgo}`));
+          }
+        } else {
+          console.log(chalk.yellow(`  ⚠️  No active assignments found but capacity shows full - possible sync issue`));
+        }
+
         continue;
       }
 
@@ -732,6 +747,25 @@ export class Orchestrator {
    */
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Get human-readable time ago string
+   */
+  private getTimeAgo(timestamp: string): string {
+    const now = new Date();
+    const past = new Date(timestamp);
+    const diffMs = now.getTime() - past.getTime();
+    const diffMins = Math.floor(diffMs / 60000);
+
+    if (diffMins < 1) return 'just now';
+    if (diffMins < 60) return `${diffMins}m ago`;
+
+    const diffHours = Math.floor(diffMins / 60);
+    if (diffHours < 24) return `${diffHours}h ago`;
+
+    const diffDays = Math.floor(diffHours / 24);
+    return `${diffDays}d ago`;
   }
 
   /**
