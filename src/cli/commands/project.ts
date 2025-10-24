@@ -61,6 +61,7 @@ export async function projectInitCommand(options: ProjectInitOptions): Promise<v
     }
 
     const configManager = new ConfigManager(cwd);
+    await configManager.load();
     const config = configManager.getConfig();
 
     // Get project ID if not provided
@@ -153,6 +154,7 @@ export async function projectStatusCommand(options: ProjectStatusOptions): Promi
   try {
     const cwd = process.cwd();
     const configManager = new ConfigManager(cwd);
+    await configManager.load();
     const config = configManager.getConfig();
 
     if (!config.project?.enabled) {
@@ -274,6 +276,7 @@ export async function projectListReadyCommand(options: ProjectListReadyOptions):
   try {
     const cwd = process.cwd();
     const configManager = new ConfigManager(cwd);
+    await configManager.load();
     const config = configManager.getConfig();
 
     if (!config.project?.enabled) {
