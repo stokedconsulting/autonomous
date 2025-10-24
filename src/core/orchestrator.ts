@@ -324,9 +324,10 @@ export class Orchestrator {
     // If project API is available, filter by status using BATCH query
     if (this.projectsAPI) {
       try {
-        // Get ALL project items in ONE query with statuses "Ready" and "Backlog"
+        // Get ALL project items in ONE query with statuses that map to 'assigned'
+        // These are: Todo, Ready, Backlog
         const result = await this.projectsAPI.queryItems({
-          status: ['Ready', 'Backlog'],
+          status: ['Todo', 'Ready', 'Backlog'],
           limit: 100,
         });
 

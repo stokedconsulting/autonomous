@@ -60,6 +60,7 @@ const STATUS_MAPPING: Record<AssignmentStatus, string> = {
  * as they don't map to active assignment statuses
  */
 const REVERSE_STATUS_MAPPING: Record<string, AssignmentStatus> = {
+  'Todo': 'assigned',              // Todo - ready to be assigned
   'Backlog': 'assigned',           // Backlog items treated as ready to assign
   'Ready': 'assigned',             // Ready to be picked up
   'In progress': 'in-progress',    // Actively being worked on
