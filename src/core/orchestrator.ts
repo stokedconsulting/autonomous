@@ -305,6 +305,7 @@ export class Orchestrator {
 
   /**
    * Fetch available issues from GitHub
+   * Filters out issues with non-ready statuses (Needs more info, Evaluated, etc)
    */
   private async fetchAvailableIssues() {
     if (!this.githubAPI) {
@@ -318,7 +319,44 @@ export class Orchestrator {
     });
 
     // Filter out already assigned issues
-    return issues.filter((issue) => !this.assignmentManager.isIssueAssigned(issue.number));
+    let availableIssues = issues.filter((issue) => !this.assignmentManager.isIssueAssigned(issue.number));
+
+    // If project API is available, filter by status
+    if (this.projectsAPI) {
+      const readyIssues: typeof issues = [];
+
+      for (const issue of availableIssues) {
+        try {
+          const projectItemId = await this.projectsAPI.getProjectItemId(issue.number);
+
+          if (!projectItemId) {
+            // Issue not in project - skip it
+            continue;
+          }
+
+          const status = await this.projectsAPI.getItemStatus(projectItemId);
+
+          // Only include issues that are ready to be assigned (Backlog or Ready status)
+          // These both map to 'assigned' status
+          // Excludes:
+          //  - In progress (already being worked on)
+          //  - In review (already done)
+          //  - Done (completed)
+          //  - Needs more info (blocked, returns null)
+          //  - Evaluated (not ready yet, returns null)
+          if (status === 'assigned') {
+            readyIssues.push(issue);
+          }
+        } catch (error) {
+          // If can't get status, skip this issue
+          console.warn(`Could not get status for issue #${issue.number}, skipping`);
+        }
+      }
+
+      return readyIssues;
+    }
+
+    return availableIssues;
   }
 
   /**
