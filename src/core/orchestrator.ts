@@ -134,20 +134,48 @@ export class Orchestrator {
     console.log(chalk.blue('Fetching available issues from GitHub...'));
 
     // Fetch issues
-    const issues = await this.fetchAvailableIssues();
+    let issues: Issue[] = [];
+    try {
+      issues = await this.fetchAvailableIssues();
+    } catch (error) {
+      console.error(
+        chalk.yellow('⚠️  Error fetching issues from GitHub:'),
+        error instanceof Error ? error.message : String(error)
+      );
+      console.log(chalk.yellow('Will retry in the monitoring loop...'));
+      // Continue to monitoring loop even if initial fetch fails
+      this.startMonitoringLoop();
+      return;
+    }
 
     if (issues.length === 0) {
       console.log(chalk.yellow('No issues available for assignment.'));
       console.log('Make sure issues have the correct labels configured in .autonomous-config.json');
+      // Still start monitoring loop to pick up work later
+      this.startMonitoringLoop();
       return;
     }
 
     console.log(chalk.green(`Found ${issues.length} available issue(s)`));
 
     // Evaluate and prioritize issues
-    const { evaluated, skipped } = await this.issueEvaluator.evaluateIssues(issues, {
-      verbose: this.verbose,
-    });
+    let evaluated: any[];
+    let skipped: Issue[];
+    try {
+      const result = await this.issueEvaluator.evaluateIssues(issues, {
+        verbose: this.verbose,
+      });
+      evaluated = result.evaluated;
+      skipped = result.skipped;
+    } catch (error) {
+      console.error(
+        chalk.yellow('⚠️  Error evaluating issues:'),
+        error instanceof Error ? error.message : String(error)
+      );
+      console.log(chalk.yellow('Will retry in the monitoring loop...'));
+      this.startMonitoringLoop();
+      return;
+    }
 
     // Report on skipped issues
     if (skipped.length > 0) {
@@ -175,23 +203,26 @@ export class Orchestrator {
     let issuesForAssignment: Issue[];
 
     if (this.prioritizer && this.fieldMapper) {
-      console.log(chalk.blue('\n🎯 Calculating hybrid priorities (AI + Project)...'));
+      try {
+        console.log(chalk.blue('\n🎯 Calculating hybrid priorities (AI + Project)...'));
 
-      // Get project metadata for all evaluated issues
-      const issueNumbers = evaluated.map((e) => e.issueNumber);
-      const projectMetadata = await this.fieldMapper.getMetadataForIssues(issueNumbers);
+        // Get project metadata for all evaluated issues
+        const issueNumbers = evaluated.map((e) => e.issueNumber);
+        const projectMetadata = await this.fieldMapper.getMetadataForIssues(issueNumbers);
 
-      // Calculate hybrid priorities
-      const prioritized = this.prioritizer.prioritizeIssues(evaluated, projectMetadata);
+        // Calculate hybrid priorities
+        const prioritized = this.prioritizer.prioritizeIssues(evaluated, projectMetadata);
 
-      // Filter to only ready items (if using project status)
-      const readyItems = this.prioritizer.filterReadyIssues(prioritized, projectMetadata);
+        // Filter to only ready items (if using project status)
+        const readyItems = this.prioritizer.filterReadyIssues(prioritized, projectMetadata);
 
-      if (readyItems.length === 0) {
-        console.log(chalk.yellow('No issues are in "Ready" status in the project.'));
-        console.log('Please move issues to "Ready" status in the project board.');
-        return;
-      }
+        if (readyItems.length === 0) {
+          console.log(chalk.yellow('No issues are in "Ready" status in the project.'));
+          console.log('Please move issues to "Ready" status in the project board.');
+          // Still start monitoring loop
+          this.startMonitoringLoop();
+          return;
+        }
 
       console.log(chalk.blue('\n📊 Hybrid Priority Ranking:'));
       readyItems.slice(0, 5).forEach((item, idx) => {
@@ -212,10 +243,21 @@ export class Orchestrator {
       });
       console.log();
 
-      // Convert back to issues
-      issuesForAssignment = readyItems.map((item) =>
-        issues.find((i) => i.number === item.issueNumber)
-      ).filter((i): i is Issue => i !== undefined);
+        // Convert back to issues
+        issuesForAssignment = readyItems.map((item) =>
+          issues.find((i) => i.number === item.issueNumber)
+        ).filter((i): i is Issue => i !== undefined);
+      } catch (error) {
+        console.error(
+          chalk.yellow('⚠️  Error fetching project metadata:'),
+          error instanceof Error ? error.message : String(error)
+        );
+        console.log(chalk.yellow('Falling back to AI-only prioritization...'));
+        // Fallback to AI-only prioritization on error
+        issuesForAssignment = evaluated.map((evaluation) =>
+          issues.find((i) => i.number === evaluation.issueNumber)
+        ).filter((i): i is Issue => i !== undefined);
+      }
     } else {
       // Fallback to AI-only prioritization
       // Issues are already sorted by AI priority from the evaluator
@@ -236,7 +278,15 @@ export class Orchestrator {
     }
 
     // Assign issues to LLM instances (starting with highest priority)
-    await this.assignIssues(issuesForAssignment);
+    try {
+      await this.assignIssues(issuesForAssignment);
+    } catch (error) {
+      console.error(
+        chalk.yellow('⚠️  Error during initial assignment:'),
+        error instanceof Error ? error.message : String(error)
+      );
+      console.log(chalk.yellow('Will retry in the monitoring loop...'));
+    }
 
     // Start monitoring loop
     this.startMonitoringLoop();
@@ -492,7 +542,17 @@ export class Orchestrator {
     console.log(chalk.blue('\nStarting monitoring loop...\n'));
 
     while (this.isRunning) {
-      await this.checkAssignments();
+      try {
+        await this.checkAssignments();
+      } catch (error) {
+        console.error(
+          chalk.yellow('⚠️  Error in monitoring loop (will retry):'),
+          error instanceof Error ? error.message : String(error)
+        );
+        if (this.verbose) {
+          console.error(chalk.gray('Stack trace:'), error);
+        }
+      }
       await this.sleep(10000); // Check every 10 seconds
     }
   }
@@ -510,10 +570,17 @@ export class Orchestrator {
     // Check for completed assignments that need new issues
     const completedAssignments = this.assignmentManager.getAssignmentsByStatus('llm-complete');
     if (completedAssignments.length > 0) {
-      // Fetch new issues and assign
-      const issues = await this.fetchAvailableIssues();
-      if (issues.length > 0) {
-        await this.assignIssues(issues);
+      try {
+        // Fetch new issues and assign
+        const issues = await this.fetchAvailableIssues();
+        if (issues.length > 0) {
+          await this.assignIssues(issues);
+        }
+      } catch (error) {
+        console.error(
+          chalk.yellow('⚠️  Error fetching available issues (will retry next cycle):'),
+          error instanceof Error ? error.message : String(error)
+        );
       }
     }
   }
