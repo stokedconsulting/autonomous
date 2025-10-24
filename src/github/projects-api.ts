@@ -786,17 +786,20 @@ export class GitHubProjectsAPI implements ProjectAPI {
     console.log('\n🤖 Using Claude to create the view via browser automation...\n');
 
     // Step 1: Navigate and check login status
-    const checkLoginPrompt = `Please navigate to ${projectUrl} using MCP browser tools.
+    // Note: Claude's MCP browser tools will reuse existing browser session if open
+    const checkLoginPrompt = `Please use MCP browser tools to navigate to ${projectUrl}.
 
-Once there, check if you can see the project or if login is required.
+The browser tools will reuse any existing browser session if one is already open.
 
-If login is required, respond with exactly: NEED LOGIN FROM USER
-If you can see the project, respond with: READY TO CREATE VIEW`;
+Once you navigate to the page, check if you can see the GitHub project or if login is required.
+
+If you see a login page, respond with exactly: NEED LOGIN FROM USER
+If you can see the project content, respond with: READY TO CREATE VIEW`;
 
     const checkLoginFile = join(tmpdir(), 'claude-check-login.txt');
     await fs.writeFile(checkLoginFile, checkLoginPrompt, 'utf-8');
 
-    console.log('🔍 Checking GitHub login status...');
+    console.log('🔍 Opening project in browser (or reusing existing session)...');
     let response = execSync(`cat "${checkLoginFile}" | ${claudeCommand}`, {
       encoding: 'utf-8',
       maxBuffer: 10 * 1024 * 1024
@@ -805,7 +808,8 @@ If you can see the project, respond with: READY TO CREATE VIEW`;
     // Check if login needed
     if (response.includes('NEED LOGIN FROM USER')) {
       console.log('\n⏸️  GitHub login required!');
-      console.log('   Please log into GitHub in the browser that just opened.');
+      console.log('   A browser window should be open. Please log into GitHub there.');
+      console.log('   (If you\'re already logged in another tab, just switch to that profile)');
       console.log('   Press ENTER when you\'re logged in and can see the project...\n');
 
       // Wait for user
