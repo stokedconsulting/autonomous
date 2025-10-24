@@ -290,13 +290,30 @@ export class IssueEvaluator {
         responseText = responseText.substring(firstBrace, lastBrace + 1);
       }
 
+      // Handle double-escaped JSON (when Claude CLI escapes the output)
+      // Check if the response contains literal \n and \" (escaped escape sequences)
+      if (responseText.includes('\\n') && responseText.includes('\\"')) {
+        // Unescape the JSON: replace \\n with \n, \\" with ", and \\\\ with \\
+        responseText = responseText
+          .replace(/\\\\"/g, '__ESCAPED_QUOTE__') // Temporarily protect \\"
+          .replace(/\\"/g, '"')                    // Replace \" with "
+          .replace(/__ESCAPED_QUOTE__/g, '\\"')    // Restore \\"
+          .replace(/\\\\n/g, '__ESCAPED_N__')      // Temporarily protect \\n
+          .replace(/\\n/g, '\n')                   // Replace \n with actual newline
+          .replace(/__ESCAPED_N__/g, '\\n')        // Restore \\n
+          .replace(/\\\\\\\\/g, '\\\\')            // Replace \\\\ with \\
+          .replace(/\\t/g, '\t');                  // Replace \t with actual tab
+      }
+
       let response;
       try {
         response = JSON.parse(responseText);
       } catch (parseError: any) {
         // Log the problematic JSON for debugging
         console.error(chalk.red(`\nFailed to parse JSON for issue #${issue.number}:`));
-        console.error(chalk.dim('Raw response (first 200 chars):'), responseText.substring(0, 200));
+        console.error(chalk.dim('Raw response:'));
+        console.error(responseText);
+        console.error(chalk.dim('\nParse error:'), parseError.message);
         throw parseError;
       }
 
