@@ -56,16 +56,15 @@ const STATUS_MAPPING: Record<AssignmentStatus, string> = {
 
 /**
  * Reverse mapping for reading from project
- * Note: "Needs more info" is intentionally omitted as it blocks assignment
+ *
+ * IMPORTANT: This is ONLY for syncing status of ALREADY ASSIGNED issues.
+ * Pre-assignment statuses (Todo, Ready, Backlog, Evaluated) are NOT included
+ * because they represent "assignable" issues, not assigned ones.
  */
 const REVERSE_STATUS_MAPPING: Record<string, AssignmentStatus> = {
-  'Todo': 'assigned',              // Todo - ready to be assigned
-  'Backlog': 'assigned',           // Backlog items treated as ready to assign
-  'Ready': 'assigned',             // Ready to be picked up
-  'Evaluated': 'assigned',         // Evaluated by AI and ready for assignment
-  'In progress': 'in-progress',    // Actively being worked on
-  'In review': 'llm-complete',     // In review after LLM completion
-  'Done': 'merged',                // Completed
+  'In progress': 'in-progress',    // Actively being worked on by LLM
+  'In review': 'llm-complete',     // LLM done, PR created, awaiting review
+  'Done': 'merged',                // PR merged, completed
 };
 
 export class GitHubProjectsAPI implements ProjectAPI {
@@ -247,7 +246,10 @@ export class GitHubProjectsAPI implements ProjectAPI {
 
   /**
    * Get the Status field value for a project item
-   * Returns null if status is not mapped (e.g., "Needs more info", "Evaluated")
+   *
+   * Returns null for unmapped statuses:
+   * - Pre-assignment: Todo, Ready, Backlog, Evaluated (assignable but not assigned yet)
+   * - Blocked: Needs more info
    */
   async getItemStatus(projectItemId: string): Promise<AssignmentStatus | null> {
     const statusFieldId = await this.getFieldId(this.config.fields.status.fieldName);
@@ -281,12 +283,12 @@ export class GitHubProjectsAPI implements ProjectAPI {
     const statusValue = result.node.fieldValueByName?.name;
 
     if (!statusValue) {
-      // Default to assigned if no status set
-      return 'assigned';
+      // No status set - treat as assignable
+      return null;
     }
 
     // Map project status to AssignmentStatus
-    // Return null for unmapped statuses (Needs more info, Evaluated, etc)
+    // Returns null for unmapped statuses (pre-assignment states, blocked states)
     return REVERSE_STATUS_MAPPING[statusValue] || null;
   }
 
