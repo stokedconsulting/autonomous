@@ -54,6 +54,45 @@ Start working on this issue now.`;
   }
 
   /**
+   * Generate continuation prompt for resuming work after process restart
+   */
+  static buildContinuationPrompt(context: {
+    assignment: Assignment;
+    worktreePath: string;
+    lastSummary?: string;
+  }): string {
+    const { assignment, worktreePath, lastSummary } = context;
+
+    let prompt = `Your previous session was interrupted. Resuming work on GitHub issue #${assignment.issueNumber}: ${assignment.issueTitle}\n\n`;
+
+    if (lastSummary) {
+      prompt += `Last session summary:\n${lastSummary}\n\n`;
+    }
+
+    prompt += `Issue Details:
+${assignment.issueBody || 'No description provided'}
+
+Your working directory is: ${worktreePath}
+Branch: ${assignment.branchName}
+
+Please:
+1. Check the current state of your work (git status, test results, etc.)
+2. Review any uncommitted or unpushed changes
+3. Continue from where you left off
+4. Complete the remaining requirements
+
+Requirements:
+- ${assignment.metadata?.requiresTests ? 'Write comprehensive tests' : 'Ensure code quality'}
+- ${assignment.metadata?.requiresTests ? 'Ensure all tests pass' : 'Test your implementation'}
+- ${assignment.metadata?.requiresCI ? 'Push changes and ensure CI passes' : 'Push your changes'}
+- Create a pull request when ready
+
+Resume working on this issue now.`;
+
+    return prompt;
+  }
+
+  /**
    * Generate follow-up prompt based on current progress
    */
   static buildFollowUpPrompt(context: PromptContext): string {

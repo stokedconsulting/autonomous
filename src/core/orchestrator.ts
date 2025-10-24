@@ -19,6 +19,7 @@ import { resolveProjectId } from '../github/project-resolver.js';
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import chalk from 'chalk';
+import { isProcessRunning } from '../utils/process.js';
 
 export class Orchestrator {
   private configManager: ConfigManager;
@@ -126,6 +127,9 @@ export class Orchestrator {
    */
   async start(): Promise<void> {
     this.isRunning = true;
+
+    // First, check for dead processes and resurrect them
+    await this.resurrectDeadAssignments();
 
     console.log(chalk.blue('Fetching available issues from GitHub...'));
 
@@ -482,6 +486,128 @@ export class Orchestrator {
 
     // For now, log that we're monitoring
     // console.log(chalk.gray(`Monitoring ${assignment.llmProvider} on issue #${assignment.issueNumber}`));
+  }
+
+  /**
+   * Resurrect dead assignments
+   * Check all in-progress assignments and restart any with dead processes
+   */
+  private async resurrectDeadAssignments(): Promise<void> {
+    const inProgressAssignments = this.assignmentManager.getAssignmentsByStatus('in-progress');
+
+    if (inProgressAssignments.length === 0) {
+      return;
+    }
+
+    console.log(chalk.blue('Checking for dead processes...'));
+
+    let resurrected = 0;
+
+    for (const assignment of inProgressAssignments) {
+      const adapter = this.adapters.get(assignment.llmProvider);
+      if (!adapter) {
+        console.warn(chalk.yellow(`No adapter found for ${assignment.llmProvider}, skipping resurrection`));
+        continue;
+      }
+
+      try {
+        const status = await adapter.getStatus(assignment.llmInstanceId);
+
+        // Check if process is actually running
+        if (status.processId && !isProcessRunning(status.processId)) {
+          console.log(chalk.yellow(`\n⚠️  Dead process detected for issue #${assignment.issueNumber}`));
+          console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
+          console.log(chalk.gray(`   Process ID: ${status.processId} (not running)`));
+          console.log(chalk.blue(`   Resurrecting process...`));
+
+          // Generate continuation prompt
+          const prompt = PromptBuilder.buildContinuationPrompt({
+            assignment,
+            worktreePath: assignment.worktreePath,
+            lastSummary: assignment.workSessions.length > 0
+              ? assignment.workSessions[assignment.workSessions.length - 1].summary
+              : undefined,
+          });
+
+          // Restart the LLM instance
+          const newInstanceId = await adapter.start({
+            assignment,
+            prompt,
+            workingDirectory: assignment.worktreePath,
+          });
+
+          // Update assignment with new instance ID
+          assignment.llmInstanceId = newInstanceId;
+          await this.assignmentManager.updateAssignment(assignment.id, {
+            lastActivity: new Date().toISOString(),
+          });
+
+          // Add a new work session for the resurrection
+          await this.assignmentManager.addWorkSession(assignment.id, {
+            startedAt: new Date().toISOString(),
+            promptUsed: prompt,
+            summary: 'Process resurrected after unexpected termination',
+          });
+
+          console.log(chalk.green(`✓ Process resurrected with new instance: ${newInstanceId}`));
+          resurrected++;
+
+          // Start log monitoring in verbose mode
+          if (this.verbose) {
+            await this.startLogMonitoring(newInstanceId, assignment.issueNumber);
+          }
+        } else if (!status.processId) {
+          console.log(chalk.yellow(`\n⚠️  No process ID for issue #${assignment.issueNumber}`));
+          console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
+          console.log(chalk.blue(`   Starting process...`));
+
+          // This assignment never had a process started (pre-fix zombie)
+          const prompt = PromptBuilder.buildContinuationPrompt({
+            assignment,
+            worktreePath: assignment.worktreePath,
+            lastSummary: assignment.workSessions.length > 0
+              ? assignment.workSessions[assignment.workSessions.length - 1].summary
+              : undefined,
+          });
+
+          const newInstanceId = await adapter.start({
+            assignment,
+            prompt,
+            workingDirectory: assignment.worktreePath,
+          });
+
+          assignment.llmInstanceId = newInstanceId;
+          await this.assignmentManager.updateAssignment(assignment.id, {
+            lastActivity: new Date().toISOString(),
+          });
+
+          await this.assignmentManager.addWorkSession(assignment.id, {
+            startedAt: new Date().toISOString(),
+            promptUsed: prompt,
+            summary: 'Process started for previously unstarted assignment',
+          });
+
+          console.log(chalk.green(`✓ Process started with instance: ${newInstanceId}`));
+          resurrected++;
+
+          if (this.verbose) {
+            await this.startLogMonitoring(newInstanceId, assignment.issueNumber);
+          }
+        }
+      } catch (error) {
+        console.error(
+          chalk.red(`Failed to resurrect assignment for issue #${assignment.issueNumber}:`),
+          error instanceof Error ? error.message : String(error)
+        );
+        // Continue with other assignments
+      }
+    }
+
+    if (resurrected > 0) {
+      console.log(chalk.green(`\n✓ Resurrected ${resurrected} process(es)\n`));
+    } else {
+      console.log(chalk.green('✓ All processes are running\n'));
+    }
   }
 
   /**
