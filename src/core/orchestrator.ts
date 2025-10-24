@@ -14,6 +14,7 @@ import { LLMAdapter } from '../llm/adapter.js';
 import { ClaudeAdapter } from '../llm/claude-adapter.js';
 import { PromptBuilder } from '../llm/prompt-builder.js';
 import { LLMProvider, Assignment, Issue } from '../types/index.js';
+import { getGitHubToken } from '../utils/github-token.js';
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import chalk from 'chalk';
@@ -57,11 +58,7 @@ export class Orchestrator {
 
     // Initialize GitHub API
     const config = this.configManager.getConfig();
-    const githubToken = process.env.GITHUB_TOKEN || config.github.token;
-
-    if (!githubToken) {
-      throw new Error('GitHub token not found. Set GITHUB_TOKEN environment variable.');
-    }
+    const githubToken = await getGitHubToken(config.github.token);
 
     this.githubAPI = new GitHubAPI(githubToken, config.github.owner, config.github.repo);
 

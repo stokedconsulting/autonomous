@@ -6,6 +6,7 @@ import { ConfigManager } from '../../core/config-manager.js';
 import { AssignmentManager } from '../../core/assignment-manager.js';
 import { Orchestrator } from '../../core/orchestrator.js';
 import { parseGitHubRemote } from '../../git/utils.js';
+import { hasGitHubToken } from '../../utils/github-token.js';
 import chalk from 'chalk';
 import { basename } from 'path';
 
@@ -102,13 +103,13 @@ export async function startCommand(options: StartOptions): Promise<void> {
 
     // Check for GitHub token
     const config = configManager.getConfig();
-    const githubToken = process.env.GITHUB_TOKEN || config.github.token;
 
-    if (!githubToken) {
+    if (!hasGitHubToken(config.github.token)) {
       console.error(chalk.red('\n✗ GitHub token not found'));
-      console.log(chalk.yellow('\nPlease set your GitHub token:'));
+      console.log(chalk.yellow('\nPlease authenticate with GitHub:'));
+      console.log('  gh auth login');
+      console.log('\nOr set GITHUB_TOKEN:');
       console.log('  export GITHUB_TOKEN=your_github_token_here');
-      console.log('\nOr add it to .autonomous-config.json under github.token');
       console.log('\nCreate a token at: https://github.com/settings/tokens');
       console.log('Required scopes: repo, workflow');
       process.exit(1);

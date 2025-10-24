@@ -12,6 +12,7 @@ import { GitHubAPI } from '../../github/api.js';
 import { GitHubProjectsAPI } from '../../github/projects-api.js';
 import { PromptBuilder } from '../../llm/prompt-builder.js';
 import { ClaudeAdapter } from '../../llm/claude-adapter.js';
+import { getGitHubToken } from '../../utils/github-token.js';
 import { join } from 'path';
 import { promises as fs } from 'fs';
 
@@ -38,14 +39,8 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
     await configManager.load();
     const config = configManager.getConfig();
 
-    // Check for GitHub token
-    const githubToken = process.env.GITHUB_TOKEN || config.github.token;
-    if (!githubToken) {
-      console.error(chalk.red('\n✗ GitHub token not found'));
-      console.log(chalk.yellow('Please set your GitHub token:'));
-      console.log('  export GITHUB_TOKEN=your_github_token_here');
-      process.exit(1);
-    }
+    // Get GitHub token
+    const githubToken = await getGitHubToken(config.github.token);
 
     // Initialize managers
     const githubAPI = new GitHubAPI(githubToken, config.github.owner, config.github.repo);
