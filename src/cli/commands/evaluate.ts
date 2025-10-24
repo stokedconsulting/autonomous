@@ -103,6 +103,7 @@ export async function evaluateCommand(options: EvaluateOptions): Promise<void> {
     const result = await issueEvaluator.evaluateIssues(issues, {
       forceReeval: options.force,
       verbose: options.verbose,
+      postClarificationComments: config.github.postClarificationComments ?? true, // Default to true
     });
 
     // Summary

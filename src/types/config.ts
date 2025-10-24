@@ -23,6 +23,7 @@ export interface GitHubConfig {
   excludeLabels?: string[];
   assignToSelf?: boolean;
   botUsername?: string; // GitHub username to assign autonomous work to (e.g., "claude-bot")
+  postClarificationComments?: boolean; // Auto-post AI-generated questions as comments (default: true)
 }
 
 export interface WorktreeConfig {
