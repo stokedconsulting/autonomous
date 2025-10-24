@@ -212,6 +212,25 @@ export class GitHubAPI {
   }
 
   /**
+   * Get all comments for an issue
+   */
+  async getComments(issueNumber: number): Promise<Array<{ id: number; body: string; user: { login: string } }>> {
+    const response = await this.octokit.issues.listComments({
+      owner: this.owner,
+      repo: this.repo,
+      issue_number: issueNumber,
+    });
+
+    return response.data.map((comment) => ({
+      id: comment.id,
+      body: comment.body || '',
+      user: {
+        login: comment.user?.login || 'unknown',
+      },
+    }));
+  }
+
+  /**
    * Add labels to an issue
    */
   async addLabels(issueNumber: number, labels: string[]): Promise<void> {
