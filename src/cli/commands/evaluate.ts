@@ -37,8 +37,6 @@ export async function evaluateCommand(options: EvaluateOptions): Promise<void> {
 
     // Fetch issues
     console.log('\nFetching issues from GitHub...');
-    const labels = config.github.labels || ['autonomous-ready'];
-    const excludeLabels = config.github.excludeLabels || [];
 
     let issues;
     if (options.issues) {
@@ -51,8 +49,29 @@ export async function evaluateCommand(options: EvaluateOptions): Promise<void> {
         })
       );
       console.log(chalk.green(`✓ Found ${issues.length} issue(s) to evaluate`));
+    } else if (config.project?.enabled) {
+      // Use project status instead of labels when project integration is enabled
+      const { GitHubProjectsAPI } = await import('../../github/projects-api.js');
+      const projectId = process.env.GITHUB_PROJECT_ID || 'PVT_kwDOBW_6Ns4BGTch';
+      const projectsAPI = new GitHubProjectsAPI(projectId, config.project);
+
+      const readyItems = await projectsAPI.getReadyItems();
+      const issueNumbers = readyItems.map(item => item.content.number).filter(Boolean) as number[];
+
+      issues = await Promise.all(
+        issueNumbers.map(async (num) => {
+          const issue = await githubAPI.getIssue(num);
+          return issue;
+        })
+      );
+
+      const readyValues = config.project.fields.status.readyValues.join(', ');
+      console.log(chalk.green(`✓ Found ${issues.length} issue(s) in project with status: ${readyValues}`));
     } else {
-      // Evaluate all issues with the configured labels
+      // Fall back to labels when project integration is not enabled
+      const labels = config.github.labels || ['autonomous-ready'];
+      const excludeLabels = config.github.excludeLabels || [];
+
       issues = await githubAPI.getIssues({
         labels,
         state: 'open',
