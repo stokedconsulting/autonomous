@@ -75,13 +75,20 @@ Started: ${new Date().toISOString()}
 `;
     await fs.writeFile(logFile, logHeader, 'utf-8');
 
-    // For now, we'll create a marker that indicates Claude should be run
-    // In a real implementation, you'd spawn this as a background process
-    // and manage it via process management
+    // Spawn Claude as a background process
+    const { spawn } = await import('child_process');
+    const child = spawn(userShell, [scriptPath], {
+      detached: true,
+      stdio: 'ignore',
+      cwd: workingDirectory,
+    });
+
+    // Unref so parent can exit without waiting
+    child.unref();
 
     const instance: ClaudeInstance = {
       instanceId,
-      processId: process.pid, // Placeholder
+      processId: child.pid || 0,
       startedAt: new Date().toISOString(),
       assignmentId: assignment.id,
       worktreePath: workingDirectory,
@@ -104,8 +111,16 @@ Started: ${new Date().toISOString()}
       throw new Error(`Instance ${instanceId} not found`);
     }
 
-    // In a real implementation, terminate the process
-    // For now, just remove from tracking
+    // Terminate the process if it's running
+    if (instance.processId) {
+      try {
+        // Kill the process group (negative PID kills the group)
+        process.kill(-instance.processId, 'SIGTERM');
+      } catch (error) {
+        // Process may have already exited, ignore
+        console.warn(`Could not kill process ${instance.processId}:`, error);
+      }
+    }
 
     this.instances.delete(instanceId);
 
