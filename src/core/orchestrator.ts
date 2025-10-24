@@ -346,6 +346,12 @@ export class Orchestrator {
    * Create and start an assignment
    */
   private async createAssignment(provider: LLMProvider, issue: any, projectName: string): Promise<void> {
+    // Check if already assigned
+    if (this.assignmentManager.isIssueAssigned(issue.number)) {
+      console.log(chalk.yellow(`Issue #${issue.number} is already assigned, skipping...`));
+      return;
+    }
+
     console.log(chalk.blue(`\nAssigning issue #${issue.number} to ${provider}...`));
 
     const config = this.configManager.getConfig();
@@ -355,15 +361,21 @@ export class Orchestrator {
 
     // Create worktree
     console.log('Creating worktree...');
-    const worktreePath = await this.worktreeManager.createWorktree({
-      issueNumber: issue.number,
-      branchName,
-      baseDir: config.worktree.baseDir,
-      projectName,
-      baseBranch: await this.worktreeManager.getDefaultBranch(),
-    });
-
-    console.log(chalk.green(`✓ Worktree created: ${worktreePath}`));
+    let worktreePath: string;
+    try {
+      worktreePath = await this.worktreeManager.createWorktree({
+        issueNumber: issue.number,
+        branchName,
+        baseDir: config.worktree.baseDir,
+        projectName,
+        baseBranch: await this.worktreeManager.getDefaultBranch(),
+      });
+      console.log(chalk.green(`✓ Worktree created: ${worktreePath}`));
+    } catch (error) {
+      console.log(chalk.yellow(`⚠️  Could not create worktree: ${error instanceof Error ? error.message : String(error)}`));
+      console.log(chalk.yellow(`   Skipping issue #${issue.number}`));
+      return;
+    }
 
     // Create assignment
     const assignment = await this.assignmentManager.createAssignment({
