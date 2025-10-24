@@ -263,7 +263,15 @@ export class IssueEvaluator {
       // Extract JSON if it's wrapped in markdown code blocks
       const jsonMatch = responseText.match(/```json\s*([\s\S]*?)\s*```/);
       if (jsonMatch) {
-        responseText = jsonMatch[1];
+        responseText = jsonMatch[1].trim();
+      }
+
+      // Find the first { and last } to extract just the JSON object
+      const firstBrace = responseText.indexOf('{');
+      const lastBrace = responseText.lastIndexOf('}');
+
+      if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+        responseText = responseText.substring(firstBrace, lastBrace + 1);
       }
 
       const response = JSON.parse(responseText);
@@ -290,7 +298,7 @@ export class IssueEvaluator {
       return evaluation;
     } catch (error: any) {
       // If Claude fails, create a minimal evaluation
-      console.warn(chalk.yellow(`Warning: Claude evaluation failed, using defaults`));
+      console.warn(chalk.yellow(`Warning: Claude evaluation failed for issue #${issue.number}: ${error.message || error}`));
 
       return {
         issueNumber: issue.number,
