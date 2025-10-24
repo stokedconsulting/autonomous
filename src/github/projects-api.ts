@@ -826,19 +826,24 @@ If you can see the project content, respond with: READY TO CREATE VIEW`;
       });
     }
 
-    // Step 2: Create the view with required fields
-    console.log('🎨 Creating the view with all required fields...');
+    // Step 2: Create the view with ALL fields we read or write
+    console.log('🎨 Creating the view with all fields...');
 
     const requiredFields = [
       'Title',
       'Assignees',
+      'Labels',
       this.config.fields.status.fieldName,
       this.config.fields.priority?.fieldName,
       this.config.fields.size?.fieldName,
-      'Work Type',
+      this.config.fields.sprint?.fieldName,
       this.config.fields.assignedInstance?.fieldName,
+      'Area',  // Read by field mapper
+      'Work Type',  // Read by field mapper
       'Target Date',
       'Effort',
+      'Milestone',
+      'Repository',
     ].filter(Boolean);
 
     const createViewPrompt = `You should now be on the GitHub project page at ${projectUrl}.
