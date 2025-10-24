@@ -57,16 +57,23 @@ export class ClaudeAdapter implements LLMAdapter {
     const script = `#!${userShell}
 cd "${workingDirectory}"
 LOG_FILE="${logFile}"
-echo "=== Claude Autonomous Session Started: \$(date) ===" > "\$LOG_FILE"
-echo "Working Directory: ${workingDirectory}" >> "\$LOG_FILE"
-echo "Instance ID: ${instanceId}" >> "\$LOG_FILE"
-echo "========================================" >> "\$LOG_FILE"
+echo "Launching Claude CLI: \$(date)" >> "\$LOG_FILE"
 echo "" >> "\$LOG_FILE"
 cat "${promptFile}" | ${cliPath}${cliArgsString} chat 2>&1 | tee -a "\$LOG_FILE"
 `;
 
     await fs.writeFile(scriptPath, script, 'utf-8');
     await fs.chmod(scriptPath, 0o755);
+
+    // Create the log file immediately so monitoring can start
+    const logHeader = `=== Claude Autonomous Session Starting ===
+Instance ID: ${instanceId}
+Working Directory: ${workingDirectory}
+Started: ${new Date().toISOString()}
+========================================
+
+`;
+    await fs.writeFile(logFile, logHeader, 'utf-8');
 
     // For now, we'll create a marker that indicates Claude should be run
     // In a real implementation, you'd spawn this as a background process
