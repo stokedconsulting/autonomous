@@ -37,120 +37,141 @@ async function init(options: InitOptions): Promise<void> {
 
     // Check if config already exists
     const exists = await configManager.exists();
-    if (exists) {
-      console.log(chalk.yellow('Configuration already exists. Use config commands to modify it.'));
-      return;
-    }
+    const isNewConfig = !exists;
 
-    console.log(chalk.blue('Initializing autonomous configuration...\n'));
+    if (exists) {
+      console.log(chalk.blue('Configuration exists - verifying setup...\n'));
+      await configManager.load();
+    } else {
+      console.log(chalk.blue('Initializing autonomous configuration...\n'));
+    }
 
     // Auto-detect GitHub owner/repo from git remote if not provided
     let { githubOwner, githubRepo } = options;
 
-    if (!githubOwner || !githubRepo) {
-      console.log('Detecting GitHub repository from git remote...');
-      const remoteInfo = await parseGitHubRemote(cwd);
+    if (isNewConfig) {
+      if (!githubOwner || !githubRepo) {
+        console.log('Detecting GitHub repository from git remote...');
+        const remoteInfo = await parseGitHubRemote(cwd);
 
-      if (remoteInfo) {
-        githubOwner = githubOwner || remoteInfo.owner;
-        githubRepo = githubRepo || remoteInfo.repo;
-        console.log(chalk.green(`✓ Detected: ${githubOwner}/${githubRepo}\n`));
+        if (remoteInfo) {
+          githubOwner = githubOwner || remoteInfo.owner;
+          githubRepo = githubRepo || remoteInfo.repo;
+          console.log(chalk.green(`✓ Detected: ${githubOwner}/${githubRepo}\n`));
+        } else {
+          console.log(chalk.yellow('Could not detect GitHub repository from git remote.\n'));
+        }
+      }
+
+      // Initialize with provided or detected options
+      await configManager.initialize(githubOwner, githubRepo);
+
+      console.log(chalk.green('✓ Configuration created: .autonomous-config.json'));
+
+      if (!githubOwner || !githubRepo) {
+        console.log(chalk.yellow('\nWarning: GitHub owner/repo not set.'));
+        console.log('Set them with:');
+        console.log('  autonomous config set github.owner <owner>');
+        console.log('  autonomous config set github.repo <repo>');
       } else {
-        console.log(chalk.yellow('Could not detect GitHub repository from git remote.\n'));
+        console.log(chalk.green(`\n✓ GitHub repository: ${githubOwner}/${githubRepo}`));
+      }
+    } else {
+      // For existing config, get owner/repo from config
+      const config = configManager.getConfig();
+      githubOwner = githubOwner || config.github.owner;
+      githubRepo = githubRepo || config.github.repo;
+
+      if (githubOwner && githubRepo) {
+        console.log(chalk.green(`✓ GitHub repository: ${githubOwner}/${githubRepo}`));
       }
     }
 
-    // Initialize with provided or detected options
-    await configManager.initialize(githubOwner, githubRepo);
+    // Check dependencies (only for new configs)
+    if (isNewConfig) {
+      console.log(chalk.blue('\n📦 Checking dependencies...'));
+      const depChecker = new DependencyChecker(cwd);
+      const dependencies = await depChecker.checkAll();
 
-    console.log(chalk.green('✓ Configuration created: .autonomous-config.json'));
+      const missingRequired = dependencies.filter((d) => d.required && !d.installed);
+      const hasChangesetDir = dependencies.find((d) => d.name === '@changesets/cli');
 
-    if (!githubOwner || !githubRepo) {
-      console.log(chalk.yellow('\nWarning: GitHub owner/repo not set.'));
-      console.log('Set them with:');
-      console.log('  autonomous config set github.owner <owner>');
-      console.log('  autonomous config set github.repo <repo>');
-    } else {
-      console.log(chalk.green(`\n✓ GitHub repository: ${githubOwner}/${githubRepo}`));
+      if (missingRequired.length > 0) {
+        console.log(chalk.yellow('\n⚠️  Warning: Missing required dependencies'));
+        console.log(chalk.gray('Run: autonomous setup'));
+      }
+
+      if (hasChangesetDir && !hasChangesetDir.installed) {
+        console.log(chalk.yellow('\n💡 Tip: Install changesets for push command:'));
+        console.log(chalk.gray('  pnpm add -D @changesets/cli && pnpm changeset init'));
+        console.log(chalk.gray('  Or run: autonomous setup'));
+      }
     }
 
-    // Check dependencies
-    console.log(chalk.blue('\n📦 Checking dependencies...'));
-    const depChecker = new DependencyChecker(cwd);
-    const dependencies = await depChecker.checkAll();
-
-    const missingRequired = dependencies.filter((d) => d.required && !d.installed);
-    const hasChangesetDir = dependencies.find((d) => d.name === '@changesets/cli');
-
-    if (missingRequired.length > 0) {
-      console.log(chalk.yellow('\n⚠️  Warning: Missing required dependencies'));
-      console.log(chalk.gray('Run: autonomous setup'));
-    }
-
-    if (hasChangesetDir && !hasChangesetDir.installed) {
-      console.log(chalk.yellow('\n💡 Tip: Install changesets for push command:'));
-      console.log(chalk.gray('  pnpm add -D @changesets/cli && pnpm changeset init'));
-      console.log(chalk.gray('  Or run: autonomous setup'));
-    }
-
-    // Auto-detect and enable project integration (unless --no-project)
+    // Setup project integration
     await configManager.load();
     const config = configManager.getConfig();
 
     if (options.project !== false && githubOwner && githubRepo) {
-      console.log(chalk.blue('\n📊 Checking for GitHub Project...'));
+      console.log(chalk.blue('\n📊 Setting up GitHub Project integration...'));
 
       try {
         const { resolveProjectId } = await import('../../github/project-resolver.js');
         const projectId = await resolveProjectId(githubOwner, githubRepo, false);
 
         if (projectId) {
-          console.log(chalk.green('✓ Found project - enabling integration'));
+          // For new configs or configs without project integration, enable it
+          if (isNewConfig || !config.project?.enabled) {
+            console.log(chalk.green('✓ Found project - enabling integration'));
 
-          // Add project configuration with sensible defaults
-          config.project = {
-            enabled: true,
-            projectNumber: 0, // Will be resolved dynamically
-            organizationProject: true, // Assume org project (can be overridden)
-            fields: {
-              status: {
-                fieldName: 'Status',
-                readyValues: ['Todo', 'Ready'],
-                inProgressValue: 'In Progress',
-                reviewValue: 'In Review',
-                doneValue: 'Done',
-                blockedValue: 'Blocked',
-              },
-              priority: {
-                fieldName: 'Priority',
-                values: {
-                  '🔴 Critical': { weight: 10 },
-                  '🟠 High': { weight: 7 },
-                  '🟡 Medium': { weight: 5 },
-                  '🟢 Low': { weight: 3 },
+            // Add project configuration with sensible defaults
+            config.project = {
+              enabled: true,
+              projectNumber: 0, // Will be resolved dynamically
+              organizationProject: true, // Assume org project (can be overridden)
+              fields: {
+                status: {
+                  fieldName: 'Status',
+                  readyValues: ['Todo', 'Ready'],
+                  inProgressValue: 'In Progress',
+                  reviewValue: 'In Review',
+                  doneValue: 'Done',
+                  blockedValue: 'Blocked',
+                },
+                priority: {
+                  fieldName: 'Priority',
+                  values: {
+                    '🔴 Critical': { weight: 10 },
+                    '🟠 High': { weight: 7 },
+                    '🟡 Medium': { weight: 5 },
+                    '🟢 Low': { weight: 3 },
+                  },
+                },
+                size: {
+                  fieldName: 'Size',
+                  preferredSizes: ['S', 'M'],
+                },
+                assignedInstance: {
+                  fieldName: 'Assigned Instance',
                 },
               },
-              size: {
-                fieldName: 'Size',
-                preferredSizes: ['S', 'M'],
-              },
-              assignedInstance: {
-                fieldName: 'Assigned Instance',
-              },
-            },
-          };
+            };
 
-          await configManager.save();
-          console.log(chalk.green('✓ Project integration enabled'));
+            await configManager.save();
+            console.log(chalk.green('✓ Project integration enabled'));
+          } else {
+            console.log(chalk.green('✓ Project integration already enabled'));
+          }
 
-          // Create Autonomous view
+          // Always try to create/ensure Autonomous view exists
           const { GitHubProjectsAPI } = await import('../../github/projects-api.js');
           const projectsAPI = new GitHubProjectsAPI(projectId, config.project);
           await projectsAPI.ensureAutonomousView();
-          console.log(chalk.green('✓ Autonomous view created'));
         } else {
           console.log(chalk.gray('  No project found - using label-based workflow'));
-          console.log(chalk.dim('  (Create a project later and run: autonomous config init)'));
+          if (isNewConfig) {
+            console.log(chalk.dim('  (Create a project later and run: autonomous init)'));
+          }
         }
       } catch (error) {
         console.log(chalk.yellow('⚠️  Could not setup project integration'));
