@@ -57,7 +57,11 @@ export async function evaluateCommand(options: EvaluateOptions): Promise<void> {
       const projectsAPI = new GitHubProjectsAPI(projectId, config.project);
 
       // Ensure autonomous view exists with all required fields
-      await projectsAPI.ensureAutonomousView();
+      const claudeConfig = config.llms?.claude?.enabled ? {
+        cliPath: config.llms.claude.cliPath || 'claude',
+        cliArgs: config.llms.claude.cliArgs,
+      } : undefined;
+      await projectsAPI.ensureAutonomousView(claudeConfig);
 
       const readyItems = await projectsAPI.getReadyItems();
       const issueNumbers = readyItems.map(item => item.content.number).filter(Boolean) as number[];

@@ -76,7 +76,11 @@ export class Orchestrator {
         this.prioritizer = new ProjectAwarePrioritizer(config.project, this.fieldMapper);
 
         // Ensure autonomous view exists with all required fields
-        await this.projectsAPI.ensureAutonomousView();
+        const claudeConfig = config.llms?.claude?.enabled ? {
+          cliPath: config.llms.claude.cliPath || 'claude',
+          cliArgs: config.llms.claude.cliArgs,
+        } : undefined;
+        await this.projectsAPI.ensureAutonomousView(claudeConfig);
 
         // Re-initialize assignment manager with project API for conflict detection
         this.assignmentManager = new AssignmentManager(this.projectPath, {

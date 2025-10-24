@@ -166,7 +166,14 @@ async function init(options: InitOptions): Promise<void> {
           // Always try to create/ensure Autonomous view exists
           const { GitHubProjectsAPI } = await import('../../github/projects-api.js');
           const projectsAPI = new GitHubProjectsAPI(projectId, config.project);
-          await projectsAPI.ensureAutonomousView();
+
+          // Pass Claude config for browser automation
+          const claudeConfig = config.llms?.claude?.enabled ? {
+            cliPath: config.llms.claude.cliPath || 'claude',
+            cliArgs: config.llms.claude.cliArgs,
+          } : undefined;
+
+          await projectsAPI.ensureAutonomousView(claudeConfig);
         } else {
           console.log(chalk.gray('  No project found - using label-based workflow'));
           if (isNewConfig) {

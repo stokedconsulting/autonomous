@@ -709,7 +709,7 @@ export class GitHubProjectsAPI implements ProjectAPI {
    * Ensure autonomous view exists with all required fields
    * Creates view via browser automation if it doesn't exist
    */
-  async ensureAutonomousView(): Promise<void> {
+  async ensureAutonomousView(claudeConfig?: { cliPath: string; cliArgs?: string[] }): Promise<void> {
     const viewName = 'Autonomous';
 
     // Check if view exists
@@ -751,7 +751,7 @@ export class GitHubProjectsAPI implements ProjectAPI {
     console.log(`\n📊 Creating "${viewName}" view via browser automation...`);
 
     try {
-      await this.createViewViaBrowser(result.node.url, viewName);
+      await this.createViewViaBrowser(result.node.url, viewName, claudeConfig);
       console.log(`✓ Created "${viewName}" view successfully`);
     } catch (error) {
       console.warn(`⚠️  Could not auto-create "${viewName}" view`);
@@ -767,12 +767,21 @@ export class GitHubProjectsAPI implements ProjectAPI {
   /**
    * Create a project view via Claude + MCP browser automation
    */
-  private async createViewViaBrowser(projectUrl: string, viewName: string): Promise<void> {
+  private async createViewViaBrowser(
+    projectUrl: string,
+    viewName: string,
+    claudeConfig?: { cliPath: string; cliArgs?: string[] }
+  ): Promise<void> {
     const { execSync } = await import('child_process');
     const readline = await import('readline');
     const { promises: fs } = await import('fs');
     const { tmpdir } = await import('os');
     const { join } = await import('path');
+
+    // Build Claude CLI command with config
+    const claudePath = claudeConfig?.cliPath || 'claude';
+    const claudeArgs = claudeConfig?.cliArgs || [];
+    const claudeCommand = `${claudePath} ${claudeArgs.join(' ')} chat`.trim();
 
     console.log('\n🤖 Using Claude to create the view via browser automation...\n');
 
@@ -788,7 +797,7 @@ If you can see the project, respond with: READY TO CREATE VIEW`;
     await fs.writeFile(checkLoginFile, checkLoginPrompt, 'utf-8');
 
     console.log('🔍 Checking GitHub login status...');
-    let response = execSync(`cat "${checkLoginFile}" | claude chat`, {
+    let response = execSync(`cat "${checkLoginFile}" | ${claudeCommand}`, {
       encoding: 'utf-8',
       maxBuffer: 10 * 1024 * 1024
     });
@@ -833,7 +842,7 @@ If there are any errors, describe what went wrong.`;
     const createViewFile = join(tmpdir(), 'claude-create-view.txt');
     await fs.writeFile(createViewFile, createViewPrompt, 'utf-8');
 
-    response = execSync(`cat "${createViewFile}" | claude chat`, {
+    response = execSync(`cat "${createViewFile}" | ${claudeCommand}`, {
       encoding: 'utf-8',
       maxBuffer: 10 * 1024 * 1024
     });
