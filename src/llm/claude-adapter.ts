@@ -54,12 +54,32 @@ export class ClaudeAdapter implements LLMAdapter {
     const userShell = process.env.SHELL || '/bin/bash';
     const scriptPath = join(this.autonomousDataDir, `start-${instanceId}.sh`);
     const logFile = join(this.autonomousDataDir, `output-${instanceId}.log`);
+    const fullCommand = `cat "${promptFile}" | ${cliPath}${cliArgsString} chat`;
     const script = `#!${userShell}
 cd "${workingDirectory}"
 LOG_FILE="${logFile}"
+
+# Log session start
 echo "Launching Claude CLI: \$(date)" >> "\$LOG_FILE"
+echo "Command: ${fullCommand}" >> "\$LOG_FILE"
 echo "" >> "\$LOG_FILE"
-cat "${promptFile}" | ${cliPath}${cliArgsString} chat 2>&1 | tee -a "\$LOG_FILE"
+echo "=== Prompt ===" >> "\$LOG_FILE"
+cat "${promptFile}" >> "\$LOG_FILE"
+echo "" >> "\$LOG_FILE"
+echo "=== Claude Output ===" >> "\$LOG_FILE"
+echo "" >> "\$LOG_FILE"
+
+# Run Claude and capture exit code
+${fullCommand} 2>&1 | tee -a "\$LOG_FILE"
+EXIT_CODE=\${PIPESTATUS[0]}
+
+# Log exit status
+echo "" >> "\$LOG_FILE"
+echo "=== Session Ended ===" >> "\$LOG_FILE"
+echo "Exit code: \$EXIT_CODE" >> "\$LOG_FILE"
+echo "Ended: \$(date)" >> "\$LOG_FILE"
+
+exit \$EXIT_CODE
 `;
 
     await fs.writeFile(scriptPath, script, 'utf-8');
