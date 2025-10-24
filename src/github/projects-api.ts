@@ -706,6 +706,84 @@ export class GitHubProjectsAPI implements ProjectAPI {
   }
 
   /**
+   * Ensure autonomous view exists with all required fields
+   * Creates view if it doesn't exist
+   */
+  async ensureAutonomousView(): Promise<void> {
+    const viewName = 'Autonomous';
+
+    // Check if view exists
+    const query = `
+      query {
+        node(id: "${this.projectId}") {
+          ... on ProjectV2 {
+            views(first: 20) {
+              nodes {
+                id
+                name
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const result = await this.graphql<{
+      node: {
+        views: {
+          nodes: Array<{ id: string; name: string }>;
+        };
+      };
+    }>(query);
+
+    const existingView = result.node.views.nodes.find(v => v.name === viewName);
+
+    if (existingView) {
+      console.log(`✓ Found existing "${viewName}" view`);
+      return;
+    }
+
+    console.log(`Creating "${viewName}" view with all required fields...`);
+
+    // Required fields for autonomous system
+    const requiredFieldNames = [
+      'Title',
+      'Assignees',
+      this.config.fields.status.fieldName,
+      this.config.fields.priority?.fieldName,
+      this.config.fields.size?.fieldName,
+      this.config.fields.sprint?.fieldName,
+      this.config.fields.assignedInstance?.fieldName,
+      'Target Date',
+      'Effort',
+    ].filter(Boolean); // Remove undefined values
+
+    // Create the view
+    const mutation = `
+      mutation {
+        createProjectV2View(input: {
+          projectId: "${this.projectId}"
+          name: "${viewName}"
+        }) {
+          projectV2View {
+            id
+            name
+          }
+        }
+      }
+    `;
+
+    try {
+      await this.graphql(mutation);
+      console.log(`✓ Created "${viewName}" view successfully`);
+      console.log(`  View includes: ${requiredFieldNames.join(', ')}`);
+    } catch (error) {
+      console.warn(`Warning: Could not create "${viewName}" view: ${error instanceof Error ? error.message : String(error)}`);
+      console.log('  You may need to create it manually in the GitHub UI');
+    }
+  }
+
+  /**
    * Clear field cache (useful for testing or when fields change)
    */
   clearCache(): void {

@@ -75,6 +75,9 @@ export class Orchestrator {
         this.fieldMapper = new ProjectFieldMapper(this.projectsAPI, config.project);
         this.prioritizer = new ProjectAwarePrioritizer(config.project, this.fieldMapper);
 
+        // Ensure autonomous view exists with all required fields
+        await this.projectsAPI.ensureAutonomousView();
+
         // Re-initialize assignment manager with project API for conflict detection
         this.assignmentManager = new AssignmentManager(this.projectPath, {
           projectAPI: this.projectsAPI,
