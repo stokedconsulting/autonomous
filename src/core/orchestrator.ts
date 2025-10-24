@@ -657,43 +657,102 @@ export class Orchestrator {
    */
   private async startLogMonitoring(instanceId: string, issueNumber: number): Promise<void> {
     const logFile = join(this.autonomousDataDir, `output-${instanceId}.log`);
+    const activityFile = join(this.autonomousDataDir, `activity-${instanceId}.log`);
 
-    // Wait a moment for the log file to be created
-    await this.sleep(1000);
+    console.log(chalk.blue(`\n${'='.repeat(80)}`));
+    console.log(chalk.blue.bold(`  📺 LIVE OUTPUT - Issue #${issueNumber}`));
+    console.log(chalk.blue(`  Instance: ${instanceId}`));
+    console.log(chalk.blue(`  Log: ${logFile}`));
+    console.log(chalk.blue(`${'='.repeat(80)}\n`));
+
+    // Wait for log file to be created
+    let retries = 0;
+    while (retries < 10) {
+      try {
+        await fs.access(logFile);
+        break;
+      } catch {
+        await this.sleep(500);
+        retries++;
+      }
+    }
 
     try {
-      // Check if log file exists
-      await fs.access(logFile);
+      // Read existing content first
+      const existingContent = await fs.readFile(logFile, 'utf-8');
+      if (existingContent) {
+        console.log(chalk.gray(existingContent));
+      }
 
       // Import spawn dynamically
       const { spawn } = await import('child_process');
 
-      console.log(chalk.blue(`\n┌─ Issue #${issueNumber} (${instanceId}) ─────────────────────────────`));
-      console.log(chalk.blue('│'));
-
-      // Start tailing the log file
-      const tail = spawn('tail', ['-f', logFile]);
+      // Start tailing the log file with inherited stdio
+      const tail = spawn('tail', ['-f', '-n', '0', logFile], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
 
       tail.stdout.on('data', (data) => {
-        const lines = data.toString().split('\n');
-        lines.forEach((line: string) => {
-          if (line.trim()) {
-            console.log(chalk.blue('│ ') + line);
-          }
-        });
+        // Output directly without prefix for clean display
+        process.stdout.write(data.toString());
       });
 
       tail.stderr.on('data', (data) => {
-        console.error(chalk.red('│ ERROR: ') + data.toString());
+        process.stderr.write(chalk.red('ERROR: ') + data.toString());
       });
 
-      tail.on('close', () => {
-        console.log(chalk.blue('└────────────────────────────────────────────────────────────'));
+      tail.on('close', (code) => {
+        console.log(chalk.blue(`\n${'='.repeat(80)}`));
+        console.log(chalk.blue(`  Session ended (exit code: ${code})`));
+        console.log(chalk.blue(`${'='.repeat(80)}\n`));
       });
 
       this.logMonitors.set(instanceId, tail);
+
+      // Also monitor activity log for tool usage
+      this.startActivityMonitoring(instanceId, activityFile);
     } catch (error) {
       console.warn(chalk.yellow(`Could not start monitoring log for ${instanceId}: ${error}`));
+    }
+  }
+
+  /**
+   * Monitor activity log to show tool usage
+   */
+  private async startActivityMonitoring(instanceId: string, activityFile: string): Promise<void> {
+    let lastSize = 0;
+
+    const checkActivity = async () => {
+      try {
+        const stats = await fs.stat(activityFile);
+        if (stats.size > lastSize) {
+          const content = await fs.readFile(activityFile, 'utf-8');
+          const lines = content.split('\n');
+          const newLines = lines.slice(Math.max(0, lines.length - 5));
+
+          // Show last tool used
+          for (const line of newLines) {
+            if (line.trim()) {
+              const match = line.match(/(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)\s+-\s+Tool:\s+(.+)/);
+              if (match) {
+                const [, timestamp, tool] = match;
+                console.log(chalk.gray(`\n[${new Date(timestamp).toLocaleTimeString()}] 🔧 Tool used: ${tool}`));
+              }
+            }
+          }
+          lastSize = stats.size;
+        }
+      } catch {
+        // File doesn't exist yet
+      }
+    };
+
+    // Check every 2 seconds for activity
+    const interval = setInterval(checkActivity, 2000);
+
+    // Store interval for cleanup
+    if (!this.logMonitors.has(`${instanceId}-activity`)) {
+      this.logMonitors.set(`${instanceId}-activity`, { kill: () => clearInterval(interval) } as any);
     }
   }
 }
