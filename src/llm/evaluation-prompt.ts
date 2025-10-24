@@ -58,12 +58,10 @@ ${relationshipSection ? `\n---\n${relationshipSection}` : ''}
 
 **Your Task:**
 Analyze this issue and provide a structured evaluation in JSON format. Consider:
-1. What type of work is this? (UI, API, backend, infrastructure, etc.)
-2. How well-defined is the issue? Are acceptance criteria clear?
-3. What's the business impact and importance?
-4. Can this be implemented with the information provided?
-5. What area/domain does it affect? (e.g., "chat", "auth", "media")
-6. What's the estimated complexity?
+1. How well-defined is the issue? Are acceptance criteria clear?
+2. What's the business impact and importance?
+3. Can this be implemented with the information provided?
+4. What's the estimated technical complexity?
 
 **Using Relationship Context:**
 - If this is a **parent/epic issue**: It likely coordinates child issues. It may be completable only after children are done. Evaluate based on whether it has a clear tracking structure and goals.
@@ -75,10 +73,8 @@ Analyze this issue and provide a structured evaluation in JSON format. Consider:
 \`\`\`json
 {
   "classification": {
-    "types": ["ui", "api"],  // Array of: ui, api, backend, database, infrastructure, devops, documentation, testing, refactoring, bug-fix, feature
-    "area": "chat",  // Specific domain (chat, auth, media, profile, etc.) or null
-    "complexity": "medium",  // low, medium, high
-    "impact": "high"  // low, medium, high, critical
+    "complexity": "medium",  // low, medium, high - Technical complexity assessment
+    "impact": "high"  // low, medium, high, critical - Business impact assessment
   },
   "scores": {
     "clarity": 8,  // 1-10: How clear and well-defined (acceptance criteria, details)
