@@ -87,9 +87,5 @@ export interface UpdateAssignmentInput {
   llmInstanceId?: string; // Allow updating instance ID for slot-based naming
 }
 
-export interface AddWorkSessionInput {
-  startedAt?: string;
-  endedAt?: string;
-  summary?: string;
-  promptUsed?: string;
-}
+// Make all WorkSession fields optional for input (startedAt will be set to current time if not provided)
+export type AddWorkSessionInput = Partial<WorkSession>;
