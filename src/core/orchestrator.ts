@@ -321,39 +321,25 @@ export class Orchestrator {
     // Filter out already assigned issues
     let availableIssues = issues.filter((issue) => !this.assignmentManager.isIssueAssigned(issue.number));
 
-    // If project API is available, filter by status
+    // If project API is available, filter by status using BATCH query
     if (this.projectsAPI) {
-      const readyIssues: typeof issues = [];
+      try {
+        // Get ALL project items in ONE query with statuses "Ready" and "Backlog"
+        const result = await this.projectsAPI.queryItems({
+          status: ['Ready', 'Backlog'],
+          limit: 100,
+        });
 
-      for (const issue of availableIssues) {
-        try {
-          const projectItemId = await this.projectsAPI.getProjectItemId(issue.number);
+        // Create a Set of issue numbers that are ready
+        const readyIssueNumbers = new Set(result.items.map(item => item.content.number));
 
-          if (!projectItemId) {
-            // Issue not in project - skip it
-            continue;
-          }
-
-          const status = await this.projectsAPI.getItemStatus(projectItemId);
-
-          // Only include issues that are ready to be assigned (Backlog or Ready status)
-          // These both map to 'assigned' status
-          // Excludes:
-          //  - In progress (already being worked on)
-          //  - In review (already done)
-          //  - Done (completed)
-          //  - Needs more info (blocked, returns null)
-          //  - Evaluated (not ready yet, returns null)
-          if (status === 'assigned') {
-            readyIssues.push(issue);
-          }
-        } catch (error) {
-          // If can't get status, skip this issue
-          console.warn(`Could not get status for issue #${issue.number}, skipping`);
-        }
+        // Filter to only issues that are in the ready set
+        return availableIssues.filter(issue => readyIssueNumbers.has(issue.number));
+      } catch (error) {
+        console.warn(`Could not filter by project status: ${error}`);
+        // Fall back to returning all available issues
+        return availableIssues;
       }
-
-      return readyIssues;
     }
 
     return availableIssues;
