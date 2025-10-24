@@ -826,20 +826,41 @@ If you can see the project content, respond with: READY TO CREATE VIEW`;
       });
     }
 
-    // Step 2: Create the view
-    console.log('🎨 Creating the view...');
+    // Step 2: Create the view with required fields
+    console.log('🎨 Creating the view with all required fields...');
+
+    const requiredFields = [
+      'Title',
+      'Assignees',
+      this.config.fields.status.fieldName,
+      this.config.fields.priority?.fieldName,
+      this.config.fields.size?.fieldName,
+      'Work Type',
+      this.config.fields.assignedInstance?.fieldName,
+      'Target Date',
+      'Effort',
+    ].filter(Boolean);
 
     const createViewPrompt = `You should now be on the GitHub project page at ${projectUrl}.
 
-Please create a new view called "${viewName}" by following these steps:
+Please create a new view called "${viewName}" with all the required fields by following these steps:
 
 1. Look for the view tabs at the top of the project (usually shows "View 1" or similar)
 2. Click the + button next to the tabs
-3. In the dialog that appears, enter the name "${viewName}"
-4. Select "Table" layout
-5. Click "Create" or "Save"
+3. In the dialog that appears:
+   - Enter the name "${viewName}"
+   - Select "Table" layout
+4. Click "Create" or "Save"
+5. Once the view is created, you need to add these fields to the view:
+   ${requiredFields.map(f => `   - ${f}`).join('\n')}
 
-Once the view is created, respond with: VIEW CREATED SUCCESSFULLY
+   To add fields:
+   - Look for the "+" button in the table header or a "Fields" or "Customize" option
+   - Click it to open the field selector
+   - Select each of the fields listed above
+   - Make sure they're all visible in the table
+
+Once all fields are added and visible, respond with: VIEW CREATED SUCCESSFULLY
 
 If there are any errors, describe what went wrong.`;
 
