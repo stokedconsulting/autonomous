@@ -119,9 +119,15 @@ export async function evaluateCommand(options: EvaluateOptions): Promise<void> {
 
     // Summary
     console.log('\n' + chalk.blue('Evaluation Summary:'));
-    console.log(`  ${chalk.green('✓')} Evaluated: ${result.evaluated.length}`);
+    console.log(`  ${chalk.green('✓')} Ready for assignment: ${result.evaluated.length}`);
     if (result.skipped.length > 0) {
-      console.log(`  ${chalk.yellow('⊘')} Skipped (cached): ${result.skipped.length}`);
+      console.log(`  ${chalk.yellow('⊘')} Needs more info: ${result.skipped.length}`);
+    }
+    if (result.totalEvaluated > 0) {
+      console.log(`  ${chalk.dim('ℹ')}  Total evaluated: ${result.totalEvaluated}`);
+    }
+    if (result.usedCache > 0) {
+      console.log(`  ${chalk.dim('⚡')} Used cache: ${result.usedCache}`);
     }
 
     if (options.verbose && result.evaluated.length > 0) {

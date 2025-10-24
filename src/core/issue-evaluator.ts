@@ -121,7 +121,7 @@ export class IssueEvaluator {
   async evaluateIssues(
     issues: Issue[],
     options: { forceReeval?: boolean; verbose?: boolean; postClarificationComments?: boolean } = {}
-  ): Promise<{ evaluated: IssueEvaluation[]; skipped: Issue[] }> {
+  ): Promise<{ evaluated: IssueEvaluation[]; skipped: Issue[]; totalEvaluated: number; usedCache: number }> {
     if (!this.cache) {
       await this.loadCache();
     }
@@ -129,6 +129,8 @@ export class IssueEvaluator {
     const { forceReeval = false, verbose = false, postClarificationComments = true } = options;
     const evaluated: IssueEvaluation[] = [];
     const skipped: Issue[] = [];
+    let totalEvaluated = 0;
+    let usedCache = 0;
 
     console.log(chalk.blue(`\n🔍 Evaluating ${issues.length} issue(s)...\n`));
 
@@ -149,6 +151,7 @@ export class IssueEvaluator {
 
         try {
           const evaluation = await this.evaluateIssue(issue);
+          totalEvaluated++;
 
           // Save to cache
           this.cache!.evaluations[issue.number] = evaluation;
@@ -243,6 +246,7 @@ export class IssueEvaluator {
         await this.sleep(500);
       } else {
         // Use cached evaluation
+        usedCache++;
         if (cachedEval.hasEnoughDetail) {
           evaluated.push(cachedEval);
           if (verbose) {
@@ -254,6 +258,13 @@ export class IssueEvaluator {
           }
         } else {
           skipped.push(issue);
+          if (verbose) {
+            console.log(
+              chalk.gray(
+                `⊘ Using cached evaluation for #${issue.number} (needs more info)`
+              )
+            );
+          }
         }
       }
     }
@@ -267,9 +278,17 @@ export class IssueEvaluator {
 
     console.log(chalk.green(`\n✓ Evaluation complete:`));
     console.log(`  ${chalk.bold(evaluated.length)} issues ready for assignment`);
-    console.log(`  ${chalk.yellow(skipped.length)} issues need more detail\n`);
+    console.log(`  ${chalk.yellow(skipped.length)} issues need more detail`);
+    if (totalEvaluated > 0) {
+      console.log(`  ${chalk.dim(totalEvaluated)} evaluated with AI`);
+    }
+    if (usedCache > 0) {
+      console.log(`  ${chalk.dim(usedCache)} used cache\n`);
+    } else {
+      console.log('');
+    }
 
-    return { evaluated, skipped };
+    return { evaluated, skipped, totalEvaluated, usedCache };
   }
 
   /**

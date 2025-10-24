@@ -556,10 +556,16 @@ export class GitHubProjectsAPI implements ProjectAPI {
 
   /**
    * Get all "ready" items (based on config)
+   * Includes items with status: Ready, Todo, and Evaluated
    */
   async getReadyItems(): Promise<ProjectItem[]> {
+    const readyStatuses = [
+      ...this.config.fields.status.readyValues,
+      this.config.fields.status.evaluatedValue,
+    ];
+
     const result = await this.queryItems({
-      status: this.config.fields.status.readyValues,
+      status: readyStatuses,
     });
 
     return result.items;
