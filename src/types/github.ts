@@ -2,6 +2,14 @@
  * GitHub API and issue-related types
  */
 
+export interface IssueRelationship {
+  type: 'parent' | 'child' | 'blocks' | 'blocked-by' | 'related' | 'subtask';
+  issueNumber: number;
+  issueTitle?: string;
+  completed?: boolean;
+  source: 'tasklist' | 'body-reference' | 'keyword' | 'timeline';
+}
+
 export interface GitHubIssue {
   number: number;
   title: string;
@@ -13,6 +21,10 @@ export interface GitHubIssue {
   updatedAt: string;
   htmlUrl: string;
   user: GitHubUser;
+  // Relationship tracking
+  relationships?: IssueRelationship[];
+  parentIssue?: number;
+  childIssues?: number[];
 }
 
 export interface GitHubLabel {
@@ -89,3 +101,6 @@ export interface GitHubRepository {
   htmlUrl: string;
   defaultBranch: string;
 }
+
+// Alias for backwards compatibility
+export type Issue = GitHubIssue;

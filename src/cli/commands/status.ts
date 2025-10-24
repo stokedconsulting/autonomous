@@ -131,6 +131,12 @@ function displayAssignment(assignment: Assignment): void {
     console.log(`   PR: ${assignment.prUrl} ${ciStatus}`);
   }
 
+  // Show log file location for in-progress assignments
+  if (assignment.status === 'in-progress' && assignment.llmInstanceId) {
+    const logFile = `${process.cwd()}/.autonomous/output-${assignment.llmInstanceId}.log`;
+    console.log(`   ${chalk.gray('Log:')} tail -f ${logFile}`);
+  }
+
   if (assignment.workSessions.length > 0) {
     const lastSession = assignment.workSessions[assignment.workSessions.length - 1];
     if (lastSession.summary) {

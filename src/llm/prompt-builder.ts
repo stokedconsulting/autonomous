@@ -41,8 +41,6 @@ Requirements:
 
 Your working directory is: ${worktreePath}
 
-Labels: ${assignment.metadata?.labels.join(', ') || 'None'}
-
 When you complete a significant task or need guidance, stop and summarize your work.
 The autonomous system will analyze your progress and provide next steps.
 

@@ -122,7 +122,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
 
     // Initialize orchestrator
     console.log('Starting orchestrator...');
-    const orchestrator = new Orchestrator(cwd, configManager, assignmentManager);
+    const orchestrator = new Orchestrator(cwd, configManager, assignmentManager, options.verbose);
     await orchestrator.initialize();
 
     if (options.dryRun) {
@@ -136,8 +136,16 @@ export async function startCommand(options: StartOptions): Promise<void> {
     await orchestrator.start();
 
     console.log(chalk.green('\n✓ Autonomous mode started'));
-    console.log(chalk.blue('\nOrchestrator is now running...'));
-    console.log('Press Ctrl+C to stop\n');
+
+    if (options.verbose) {
+      console.log(chalk.blue('\n📡 Monitoring Mode - Streaming Claude output...\n'));
+      console.log(chalk.gray('─'.repeat(80)));
+      console.log();
+    } else {
+      console.log(chalk.blue('\nOrchestrator is now running...'));
+      console.log(chalk.gray('Tip: Use --verbose flag to stream Claude output in real-time'));
+      console.log('Press Ctrl+C to stop\n');
+    }
 
     // Handle graceful shutdown
     process.on('SIGINT', async () => {

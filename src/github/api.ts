@@ -11,6 +11,7 @@ import {
   CreatePROptions,
   MergePROptions,
 } from '../types/index.js';
+import { IssueRelationshipParser } from '../utils/issue-relationship-parser.js';
 
 export class GitHubAPI {
   private octokit: Octokit;
@@ -247,9 +248,61 @@ export class GitHubAPI {
   }
 
   /**
+   * Get issue with full relationship context
+   */
+  async getIssueWithContext(issueNumber: number, depth: number = 1): Promise<{
+    issue: GitHubIssue;
+    relatedIssues: Map<number, GitHubIssue>;
+  }> {
+    const issue = await this.getIssue(issueNumber);
+    const relatedIssues = new Map<number, GitHubIssue>();
+
+    if (depth > 0 && issue.relationships) {
+      // Fetch all related issues
+      const relatedNumbers = new Set<number>();
+
+      issue.relationships.forEach((rel) => {
+        relatedNumbers.add(rel.issueNumber);
+      });
+
+      // Fetch related issues in parallel
+      const fetches = Array.from(relatedNumbers).map(async (num) => {
+        try {
+          const related = await this.getIssue(num);
+          relatedIssues.set(num, related);
+        } catch (error) {
+          // Issue might not exist or be inaccessible
+          console.warn(`Could not fetch related issue #${num}`);
+        }
+      });
+
+      await Promise.all(fetches);
+
+      // If depth > 1, recursively fetch parent's context
+      if (depth > 1 && issue.parentIssue) {
+        try {
+          const parentContext = await this.getIssueWithContext(issue.parentIssue, depth - 1);
+          // Add parent and its related issues
+          relatedIssues.set(issue.parentIssue, parentContext.issue);
+          parentContext.relatedIssues.forEach((relatedIssue, num) => {
+            relatedIssues.set(num, relatedIssue);
+          });
+        } catch (error) {
+          console.warn(`Could not fetch parent issue #${issue.parentIssue}`);
+        }
+      }
+    }
+
+    return { issue, relatedIssues };
+  }
+
+  /**
    * Map GitHub API issue to our type
    */
   private mapIssue(issue: any): GitHubIssue {
+    // Parse relationships from issue body
+    const parsed = IssueRelationshipParser.parse(issue.body, issue.number);
+
     return {
       number: issue.number,
       title: issue.title,
@@ -276,6 +329,10 @@ export class GitHubAPI {
         avatarUrl: issue.user.avatar_url,
         htmlUrl: issue.user.html_url,
       },
+      // Relationship fields
+      relationships: parsed.relationships,
+      parentIssue: parsed.parent,
+      childIssues: parsed.children,
     };
   }
 

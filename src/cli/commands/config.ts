@@ -5,6 +5,7 @@
 import { ConfigManager } from '../../core/config-manager.js';
 import { LLMProvider, LLMConfig } from '../../types/index.js';
 import { parseGitHubRemote } from '../../git/utils.js';
+import { DependencyChecker } from '../../utils/dependency-checker.js';
 import chalk from 'chalk';
 
 interface InitOptions {
@@ -72,10 +73,31 @@ async function init(options: InitOptions): Promise<void> {
       console.log(chalk.green(`\n✓ GitHub repository: ${githubOwner}/${githubRepo}`));
     }
 
+    // Check dependencies
+    console.log(chalk.blue('\n📦 Checking dependencies...'));
+    const depChecker = new DependencyChecker(cwd);
+    const dependencies = await depChecker.checkAll();
+
+    const missingRequired = dependencies.filter((d) => d.required && !d.installed);
+    const hasChangesetDir = dependencies.find((d) => d.name === '@changesets/cli');
+
+    if (missingRequired.length > 0) {
+      console.log(chalk.yellow('\n⚠️  Warning: Missing required dependencies'));
+      console.log(chalk.gray('Run: autonomous setup'));
+    }
+
+    if (hasChangesetDir && !hasChangesetDir.installed) {
+      console.log(chalk.yellow('\n💡 Tip: Install changesets for push command:'));
+      console.log(chalk.gray('  pnpm add -D @changesets/cli && pnpm changeset init'));
+      console.log(chalk.gray('  Or run: autonomous setup'));
+    }
+
     console.log(chalk.blue('\nNext steps:'));
-    console.log('1. Configure an LLM provider:');
+    console.log('1. Check/install dependencies:');
+    console.log('   autonomous setup');
+    console.log('2. Configure an LLM provider (if not auto-configured):');
     console.log('   autonomous config add-llm claude --cli-path /path/to/claude');
-    console.log('2. Start autonomous mode:');
+    console.log('3. Start autonomous mode:');
     console.log('   autonomous start');
   } catch (error) {
     console.error(chalk.red('Error initializing configuration:'), error);

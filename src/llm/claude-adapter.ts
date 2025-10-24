@@ -53,9 +53,16 @@ export class ClaudeAdapter implements LLMAdapter {
     // Use user's shell to ensure PATH is set correctly
     const userShell = process.env.SHELL || '/bin/bash';
     const scriptPath = join(this.autonomousDataDir, `start-${instanceId}.sh`);
+    const logFile = join(this.autonomousDataDir, `output-${instanceId}.log`);
     const script = `#!${userShell}
 cd "${workingDirectory}"
-cat "${promptFile}" | ${cliPath}${cliArgsString} chat
+LOG_FILE="${logFile}"
+echo "=== Claude Autonomous Session Started: \$(date) ===" > "\$LOG_FILE"
+echo "Working Directory: ${workingDirectory}" >> "\$LOG_FILE"
+echo "Instance ID: ${instanceId}" >> "\$LOG_FILE"
+echo "========================================" >> "\$LOG_FILE"
+echo "" >> "\$LOG_FILE"
+cat "${promptFile}" | ${cliPath}${cliArgsString} chat 2>&1 | tee -a "\$LOG_FILE"
 `;
 
     await fs.writeFile(scriptPath, script, 'utf-8');
