@@ -9,6 +9,15 @@ import { startCommand } from './commands/start.js';
 import { stopCommand } from './commands/stop.js';
 import { statusCommand } from './commands/status.js';
 import { configCommand } from './commands/config.js';
+import { pushCommand } from './commands/push.js';
+import { assignCommand } from './commands/assign.js';
+import { unassignCommand } from './commands/unassign.js';
+import { setupCommand } from './commands/setup.js';
+import {
+  projectInitCommand,
+  projectStatusCommand,
+  projectListReadyCommand,
+} from './commands/project.js';
 
 const program = new Command();
 
@@ -76,6 +85,65 @@ config
   .command('validate')
   .description('Validate current configuration')
   .action(configCommand.validate);
+
+// Push command
+program
+  .command('push')
+  .description('Auto-generate changeset, commit, and push changes')
+  .option('--pr', 'Create or update pull request')
+  .action(pushCommand);
+
+// Assign command
+program
+  .command('assign <issue-number>')
+  .description('Manually assign a specific issue to autonomous processing')
+  .option('--skip-eval', 'Skip issue evaluation step')
+  .option('-v, --verbose', 'Enable verbose output')
+  .action(assignCommand);
+
+// Unassign command
+program
+  .command('unassign <issue-number>')
+  .description('Stop work on a specific issue and clean up')
+  .option('--cleanup', 'Automatically delete worktree without prompting')
+  .option('-f, --force', 'Skip all confirmation prompts')
+  .action(unassignCommand);
+
+// Setup command
+program
+  .command('setup')
+  .description('Check and install dependencies for autonomous commands')
+  .option('--install-all', 'Install all optional dependencies without prompting')
+  .option('--skip-prompts', 'Skip all prompts')
+  .action(setupCommand);
+
+// Project command
+const project = program
+  .command('project')
+  .description('Manage GitHub Projects v2 integration');
+
+project
+  .command('init')
+  .description('Initialize GitHub Projects integration')
+  .option('--project-number <number>', 'GitHub Projects v2 number', parseInt)
+  .option('--project-id <id>', 'GitHub Projects v2 ID (alternative to number)')
+  .option('--org', 'Organization project (default: true)')
+  .action(projectInitCommand);
+
+project
+  .command('status')
+  .description('Show project status and ready items')
+  .option('-j, --json', 'Output as JSON')
+  .option('-v, --verbose', 'Show detailed information')
+  .action(projectStatusCommand);
+
+project
+  .command('list-ready')
+  .description('List ready items with hybrid prioritization')
+  .option('-l, --limit <number>', 'Limit number of items to show', parseInt)
+  .option('-j, --json', 'Output as JSON')
+  .option('-v, --verbose', 'Show detailed prioritization breakdown')
+  .action(projectListReadyCommand);
 
 // Parse arguments
 program.parse();

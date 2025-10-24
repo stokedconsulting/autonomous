@@ -1,0 +1,100 @@
+{
+  "version": "1.0.0",
+  "llms": {
+    "claude": {
+      "enabled": true,
+      "maxConcurrentIssues": 3,
+      "cliPath": "claude",
+      "cliArgs": [
+        "--dangerously-skip-permissions"
+      ],
+      "hooksEnabled": true
+    }
+  },
+  "github": {
+    "owner": "stokedconsulting",
+    "repo": "autonomous",
+    "labels": [],
+    "excludeLabels": [
+      "wontfix",
+      "duplicate",
+      "needs-details"
+    ]
+  },
+  "project": {
+    "enabled": true,
+    "projectNumber": 5,
+    "organizationProject": true,
+    "fields": {
+      "status": {
+        "fieldName": "Status",
+        "readyValues": ["Ready", "Todo"],
+        "inProgressValue": "In Progress",
+        "reviewValue": "In Review",
+        "doneValue": "Done",
+        "blockedValue": "Blocked"
+      },
+      "priority": {
+        "fieldName": "Priority",
+        "values": {
+          "critical": { "weight": 10 },
+          "high": { "weight": 7 },
+          "medium": { "weight": 4 },
+          "low": { "weight": 1 }
+        }
+      },
+      "size": {
+        "fieldName": "Size",
+        "preferredSizes": ["S", "M"]
+      },
+      "sprint": {
+        "fieldName": "Sprint",
+        "currentSprint": "Sprint 1"
+      }
+    },
+    "prioritization": {
+      "weights": {
+        "projectPriority": 0.5,
+        "aiEvaluation": 0.3,
+        "sprintBoost": 0.1,
+        "sizePreference": 0.1
+      }
+    },
+    "sync": {
+      "conflictResolution": "project-wins",
+      "autoReconcile": false,
+      "syncInterval": 0
+    }
+  },
+  "worktree": {
+    "baseDir": "..",
+    "namingPattern": "{projectName}-issue-{number}",
+    "branchPrefix": "feature/issue-",
+    "cleanup": {
+      "onComplete": false,
+      "onError": false
+    }
+  },
+  "push": {
+    "enableChangeset": true,
+    "conventionalCommits": true,
+    "scopeMap": {
+      "src/cli/**": "cli",
+      "src/github/**": "github",
+      "src/llm/**": "llm",
+      "src/core/**": "core",
+      "src/types/**": "types",
+      "docs/**": "docs",
+      "test/**": "test"
+    }
+  },
+  "requirements": {
+    "testingRequired": true,
+    "ciMustPass": true,
+    "prTemplateRequired": false
+  },
+  "logging": {
+    "level": "info",
+    "verboseMode": false
+  }
+}
