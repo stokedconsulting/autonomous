@@ -92,6 +92,34 @@ async function init(options: InitOptions): Promise<void> {
       console.log(chalk.gray('  Or run: autonomous setup'));
     }
 
+    // Create Autonomous view if project integration is enabled
+    await configManager.load();
+    const config = configManager.getConfig();
+
+    if (config.project?.enabled && githubOwner && githubRepo) {
+      console.log(chalk.blue('\n📊 Setting up GitHub Project...'));
+
+      try {
+        const { resolveProjectId } = await import('../../github/project-resolver.js');
+        const projectId = await resolveProjectId(githubOwner, githubRepo, false);
+
+        if (projectId) {
+          const { GitHubProjectsAPI } = await import('../../github/projects-api.js');
+          const projectsAPI = new GitHubProjectsAPI(projectId, config.project);
+          await projectsAPI.ensureAutonomousView();
+          console.log(chalk.green('✓ GitHub Project view configured'));
+        } else {
+          console.log(chalk.yellow('⚠️  No GitHub Project found - skipping view creation'));
+          console.log(chalk.gray('   Create a project first, then run: autonomous evaluate'));
+        }
+      } catch (error) {
+        console.log(chalk.yellow('⚠️  Could not create project view (you can do this later)'));
+        if (error instanceof Error) {
+          console.log(chalk.gray(`   ${error.message}`));
+        }
+      }
+    }
+
     console.log(chalk.blue('\nNext steps:'));
     console.log('1. Check/install dependencies:');
     console.log('   autonomous setup');
