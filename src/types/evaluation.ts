@@ -36,6 +36,7 @@ export interface IssueEvaluation {
   issueTitle: string;
   lastModified: string; // ISO date from GitHub
   lastEvaluated: string; // ISO date when we evaluated
+  contentHash: string; // Hash of title, body, labels - used to detect actual content changes
   classification: IssueClassification;
   scores: IssueScores;
   hasEnoughDetail: boolean;

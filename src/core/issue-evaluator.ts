@@ -55,6 +55,12 @@ export class IssueEvaluator {
           if (!evaluation.scores.aiPriorityScore) {
             evaluation.scores.aiPriorityScore = 5;
           }
+
+          // Add contentHash for old evaluations (they'll be re-evaluated if content changes)
+          if (!evaluation.contentHash) {
+            // Generate a placeholder hash - will be updated on next evaluation if content changed
+            evaluation.contentHash = 'legacy';
+          }
         }
       }
     } catch (error) {
@@ -81,6 +87,26 @@ export class IssueEvaluator {
   }
 
   /**
+   * Generate a content hash for an issue to detect actual content changes
+   * Ignores updatedAt to avoid re-evaluation when only comments are added
+   */
+  private generateIssueContentHash(issue: Issue): string {
+    const content = JSON.stringify({
+      title: issue.title,
+      body: issue.body,
+      labels: issue.labels.map((l: any) => l.name).sort(),
+    });
+    // Simple hash function
+    let hash = 0;
+    for (let i = 0; i < content.length; i++) {
+      const char = content.charCodeAt(i);
+      hash = ((hash << 5) - hash) + char;
+      hash = hash & hash; // Convert to 32bit integer
+    }
+    return hash.toString(36);
+  }
+
+  /**
    * Evaluate and prioritize a list of issues
    * Returns issues sorted by priority (highest first)
    */
@@ -99,12 +125,14 @@ export class IssueEvaluator {
     console.log(chalk.blue(`\n🔍 Evaluating ${issues.length} issue(s)...\n`));
 
     for (const issue of issues) {
-      // Check if we need to re-evaluate
+      // Check if we need to re-evaluate based on content hash
       const cachedEval = this.cache!.evaluations[issue.number];
+      const currentContentHash = this.generateIssueContentHash(issue);
+
       const needsEval =
         forceReeval ||
         !cachedEval ||
-        new Date(issue.updatedAt) > new Date(cachedEval.lastModified);
+        cachedEval.contentHash !== currentContentHash;
 
       if (needsEval) {
         if (verbose) {
@@ -346,6 +374,7 @@ export class IssueEvaluator {
         issueTitle: issue.title,
         lastModified: issue.updatedAt,
         lastEvaluated: new Date().toISOString(),
+        contentHash: this.generateIssueContentHash(issue),
         classification: response.classification,
         scores: {
           ...response.scores,
@@ -367,6 +396,7 @@ export class IssueEvaluator {
         issueTitle: issue.title,
         lastModified: issue.updatedAt,
         lastEvaluated: new Date().toISOString(),
+        contentHash: this.generateIssueContentHash(issue),
         classification: {
           // NOTE: Area and Issue Type removed - read from project instead
           complexity: 'medium',
