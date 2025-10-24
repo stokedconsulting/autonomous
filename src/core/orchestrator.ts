@@ -477,15 +477,72 @@ export class Orchestrator {
   }
 
   /**
-   * Check a single assignment
+   * Check a single assignment for completion
    */
-  private async checkAssignment(_assignment: Assignment): Promise<void> {
-    // Check for session data / work completion
-    // In a real implementation, this would check for hook callbacks
-    // and determine if the LLM needs a new prompt
+  private async checkAssignment(assignment: Assignment): Promise<void> {
+    const adapter = this.adapters.get(assignment.llmProvider);
+    if (!adapter) {
+      return;
+    }
 
-    // For now, log that we're monitoring
-    // console.log(chalk.gray(`Monitoring ${assignment.llmProvider} on issue #${assignment.issueNumber}`));
+    try {
+      const status = await adapter.getStatus(assignment.llmInstanceId);
+
+      // If session ended, mark as complete
+      if (!status.isRunning && assignment.status === 'in-progress') {
+        console.log(chalk.green(`\n✓ Issue #${assignment.issueNumber} work completed by ${assignment.llmProvider}`));
+
+        // Check for session file with PR info
+        const sessionFile = join(this.autonomousDataDir, `session-${assignment.llmInstanceId}.json`);
+        let prNumber: number | undefined;
+        let prUrl: string | undefined;
+        let summary: string | undefined;
+
+        try {
+          const sessionData = JSON.parse(await fs.readFile(sessionFile, 'utf-8'));
+          prNumber = sessionData.prNumber;
+          prUrl = sessionData.prUrl;
+          summary = sessionData.summary || 'Work completed';
+        } catch {
+          // No session file or couldn't parse - that's ok
+          summary = 'Work completed';
+        }
+
+        // Update assignment to llm-complete
+        const updates: any = {
+          completedAt: new Date().toISOString(),
+        };
+
+        if (prNumber) updates.prNumber = prNumber;
+        if (prUrl) updates.prUrl = prUrl;
+
+        // Update with GitHub sync if available
+        if (this.projectsAPI) {
+          await this.assignmentManager.updateStatusWithSync(assignment.id, 'llm-complete');
+          await this.assignmentManager.updateAssignment(assignment.id, updates);
+        } else {
+          await this.assignmentManager.updateAssignment(assignment.id, {
+            ...updates,
+            status: 'llm-complete',
+          });
+        }
+
+        // Add final work session
+        await this.assignmentManager.addWorkSession(assignment.id, {
+          endedAt: new Date().toISOString(),
+          summary,
+        });
+
+        if (prUrl) {
+          console.log(chalk.blue(`   PR created: ${prUrl}`));
+        }
+      }
+    } catch (error) {
+      console.error(
+        chalk.red(`Error checking assignment for issue #${assignment.issueNumber}:`),
+        error instanceof Error ? error.message : String(error)
+      );
+    }
   }
 
   /**
