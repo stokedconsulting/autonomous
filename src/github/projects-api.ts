@@ -56,13 +56,13 @@ const STATUS_MAPPING: Record<AssignmentStatus, string> = {
 
 /**
  * Reverse mapping for reading from project
- * Note: "Needs more info" and "Evaluated" are intentionally omitted
- * as they don't map to active assignment statuses
+ * Note: "Needs more info" is intentionally omitted as it blocks assignment
  */
 const REVERSE_STATUS_MAPPING: Record<string, AssignmentStatus> = {
   'Todo': 'assigned',              // Todo - ready to be assigned
   'Backlog': 'assigned',           // Backlog items treated as ready to assign
   'Ready': 'assigned',             // Ready to be picked up
+  'Evaluated': 'assigned',         // Evaluated by AI and ready for assignment
   'In progress': 'in-progress',    // Actively being worked on
   'In review': 'llm-complete',     // In review after LLM completion
   'Done': 'merged',                // Completed

@@ -325,9 +325,9 @@ export class Orchestrator {
     if (this.projectsAPI) {
       try {
         // Get ALL project items in ONE query with statuses that map to 'assigned'
-        // These are: Todo, Ready, Backlog
+        // These are: Todo, Ready, Backlog, Evaluated
         const result = await this.projectsAPI.queryItems({
-          status: ['Todo', 'Ready', 'Backlog'],
+          status: ['Todo', 'Ready', 'Backlog', 'Evaluated'],
           limit: 100,
         });
 
