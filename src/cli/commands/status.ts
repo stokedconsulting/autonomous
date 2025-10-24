@@ -5,6 +5,8 @@
 import { AssignmentManager } from '../../core/assignment-manager.js';
 import { Assignment, AssignmentStatus } from '../../types/index.js';
 import chalk from 'chalk';
+import { join } from 'path';
+import { existsSync } from 'fs';
 
 interface StatusOptions {
   json?: boolean;
@@ -133,8 +135,12 @@ function displayAssignment(assignment: Assignment): void {
 
   // Show log file location for in-progress assignments
   if (assignment.status === 'in-progress' && assignment.llmInstanceId) {
-    const logFile = `${process.cwd()}/.autonomous/output-${assignment.llmInstanceId}.log`;
-    console.log(`   ${chalk.gray('Log:')} tail -f ${logFile}`);
+    const logFile = join(process.cwd(), '.autonomous', `output-${assignment.llmInstanceId}.log`);
+    if (existsSync(logFile)) {
+      console.log(`   ${chalk.gray('Log:')} tail -f ${logFile}`);
+    } else {
+      console.log(`   ${chalk.yellow('Log:')} ${logFile} ${chalk.gray('(not yet created)')}`);
+    }
   }
 
   if (assignment.workSessions.length > 0) {
