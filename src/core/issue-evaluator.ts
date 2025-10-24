@@ -274,7 +274,15 @@ export class IssueEvaluator {
         responseText = responseText.substring(firstBrace, lastBrace + 1);
       }
 
-      const response = JSON.parse(responseText);
+      let response;
+      try {
+        response = JSON.parse(responseText);
+      } catch (parseError: any) {
+        // Log the problematic JSON for debugging
+        console.error(chalk.red(`\nFailed to parse JSON for issue #${issue.number}:`));
+        console.error(chalk.dim('Raw response (first 200 chars):'), responseText.substring(0, 200));
+        throw parseError;
+      }
 
       // Calculate AI priority score (weighted average of AI metrics)
       const aiPriorityScore = this.calculateAIPriorityScore(response.scores);
