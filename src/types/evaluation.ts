@@ -11,10 +11,14 @@ export type Complexity = 'low' | 'medium' | 'high';
 export type Impact = 'low' | 'medium' | 'high' | 'critical';
 
 export interface IssueClassification {
-  // NOTE: Area and Issue Type removed - read from project fields instead
+  // NOTE: Area and Issue Type removed - read from project fields instead (Phase 0)
   // AI assessments (not in project)
   complexity: Complexity;  // AI's technical complexity assessment (different from project Size)
   impact: Impact;          // AI's business impact assessment (informs project Priority)
+
+  // Deprecated fields (kept for backward compatibility with old cached evaluations)
+  types?: string[];  // DEPRECATED: Now read from project "Issue Type" field
+  area?: string | null;  // DEPRECATED: Now read from project "Area" field
 }
 
 export interface IssueScores {
@@ -22,6 +26,9 @@ export interface IssueScores {
   importance: number;    // 1-10: Business value and impact (AI-only)
   feasibility: number;   // 1-10: Can it be implemented with available info (AI-only)
   aiPriorityScore: number;  // Calculated AI score (30% weight in hybrid prioritization)
+
+  // Deprecated fields (kept for backward compatibility with old cached evaluations)
+  priority?: number;  // DEPRECATED: Renamed to aiPriorityScore
 }
 
 export interface IssueEvaluation {

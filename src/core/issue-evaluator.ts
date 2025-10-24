@@ -41,6 +41,22 @@ export class IssueEvaluator {
     try {
       const data = await fs.readFile(this.cachePath, 'utf-8');
       this.cache = JSON.parse(data);
+
+      // Migrate old evaluation format to new schema (backward compatibility)
+      if (this.cache) {
+        for (const issueNum in this.cache.evaluations) {
+          const evaluation = this.cache.evaluations[issueNum];
+
+          // Migrate priority -> aiPriorityScore
+          if (!evaluation.scores.aiPriorityScore && (evaluation.scores as any).priority) {
+            evaluation.scores.aiPriorityScore = (evaluation.scores as any).priority;
+          }
+          // Ensure aiPriorityScore exists (fallback to default)
+          if (!evaluation.scores.aiPriorityScore) {
+            evaluation.scores.aiPriorityScore = 5;
+          }
+        }
+      }
     } catch (error) {
       // Cache doesn't exist yet, initialize empty
       this.cache = {
