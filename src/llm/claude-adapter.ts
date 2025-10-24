@@ -101,6 +101,10 @@ Started: ${new Date().toISOString()}
       detached: true,
       stdio: 'ignore',
       cwd: workingDirectory,
+      env: {
+        ...process.env,
+        CLAUDE_INSTANCE_ID: instanceId,
+      },
     });
 
     // Unref so parent can exit without waiting
@@ -167,15 +171,46 @@ Started: ${new Date().toISOString()}
       };
     }
 
-    // Check if session data exists
+    // Check if session has ended via hook
     const sessionFile = join(this.autonomousDataDir, `session-${instanceId}.json`);
+    let sessionEnded = false;
     let lastActivity: string | undefined;
 
     try {
       const sessionData = JSON.parse(await fs.readFile(sessionFile, 'utf-8'));
+      sessionEnded = true;
       lastActivity = sessionData.lastActivity;
     } catch {
-      // No session data yet
+      // No session end file yet - still running or hasn't started working
+    }
+
+    // If session ended, mark as not running
+    if (sessionEnded) {
+      return {
+        instanceId,
+        provider: 'claude',
+        isRunning: false,
+        startedAt: instance.startedAt,
+        lastActivity,
+        processId: instance.processId,
+      };
+    }
+
+    // Check activity log for recent tool usage
+    const activityFile = join(this.autonomousDataDir, `activity-${instanceId}.log`);
+    try {
+      const activityLog = await fs.readFile(activityFile, 'utf-8');
+      const lines = activityLog.trim().split('\n').filter(l => l.trim());
+      if (lines.length > 0) {
+        // Parse last activity timestamp
+        const lastLine = lines[lines.length - 1];
+        const match = lastLine.match(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)/);
+        if (match) {
+          lastActivity = match[1];
+        }
+      }
+    } catch {
+      // No activity log yet - Claude hasn't used any tools
     }
 
     return {

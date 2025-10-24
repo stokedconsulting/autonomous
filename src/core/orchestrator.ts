@@ -513,6 +513,14 @@ export class Orchestrator {
       try {
         const status = await adapter.getStatus(assignment.llmInstanceId);
 
+        // If status says not running (session ended via hook), it's legitimately done
+        if (!status.isRunning) {
+          if (this.verbose) {
+            console.log(chalk.gray(`  Instance ${assignment.llmInstanceId}: Session completed normally`));
+          }
+          continue;
+        }
+
         // Check if process is actually running
         if (status.processId && !isProcessRunning(status.processId)) {
           console.log(chalk.yellow(`\n⚠️  Dead process detected for issue #${assignment.issueNumber}`));
