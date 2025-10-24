@@ -258,7 +258,7 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
     const logFile = join(autonomousDataDir, `output-${assignment.llmInstanceId}.log`);
     console.log(chalk.blue(`\n📊 Monitor progress:`));
     console.log(chalk.gray(`  tail -f ${logFile}`));
-    console.log(chalk.gray(`  autonomous status`));
+    console.log(chalk.gray(`  auto status`));
   } catch (error: any) {
     console.error(chalk.red('\n✗ Error assigning issue:'), error.message);
     if (options.verbose) {

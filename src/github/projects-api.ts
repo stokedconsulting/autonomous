@@ -707,7 +707,7 @@ export class GitHubProjectsAPI implements ProjectAPI {
 
   /**
    * Ensure autonomous view exists with all required fields
-   * Creates view if it doesn't exist
+   * Creates view via browser automation if it doesn't exist
    */
   async ensureAutonomousView(): Promise<void> {
     const viewName = 'Autonomous';
@@ -717,6 +717,8 @@ export class GitHubProjectsAPI implements ProjectAPI {
       query {
         node(id: "${this.projectId}") {
           ... on ProjectV2 {
+            number
+            url
             views(first: 20) {
               nodes {
                 id
@@ -730,6 +732,8 @@ export class GitHubProjectsAPI implements ProjectAPI {
 
     const result = await this.graphql<{
       node: {
+        number: number;
+        url: string;
         views: {
           nodes: Array<{ id: string; name: string }>;
         };
@@ -743,43 +747,102 @@ export class GitHubProjectsAPI implements ProjectAPI {
       return;
     }
 
-    console.log(`Creating "${viewName}" view with all required fields...`);
-
-    // Required fields for autonomous system
-    const requiredFieldNames = [
-      'Title',
-      'Assignees',
-      this.config.fields.status.fieldName,
-      this.config.fields.priority?.fieldName,
-      this.config.fields.size?.fieldName,
-      this.config.fields.sprint?.fieldName,
-      this.config.fields.assignedInstance?.fieldName,
-      'Target Date',
-      'Effort',
-    ].filter(Boolean); // Remove undefined values
-
-    // Create the view
-    const mutation = `
-      mutation {
-        createProjectV2View(input: {
-          projectId: "${this.projectId}"
-          name: "${viewName}"
-        }) {
-          projectV2View {
-            id
-            name
-          }
-        }
-      }
-    `;
+    // View doesn't exist - try to create it via browser automation
+    console.log(`\n📊 Creating "${viewName}" view via browser automation...`);
 
     try {
-      await this.graphql(mutation);
+      await this.createViewViaBrowser(result.node.url, viewName);
       console.log(`✓ Created "${viewName}" view successfully`);
-      console.log(`  View includes: ${requiredFieldNames.join(', ')}`);
     } catch (error) {
-      console.warn(`Warning: Could not create "${viewName}" view: ${error instanceof Error ? error.message : String(error)}`);
-      console.log('  You may need to create it manually in the GitHub UI');
+      console.warn(`⚠️  Could not auto-create "${viewName}" view`);
+      console.log(`   Error: ${error instanceof Error ? error.message : String(error)}`);
+      console.log('\n📋 To create the view manually:');
+      console.log(`   1. Open: ${result.node.url}`);
+      console.log('   2. Click the + button next to view tabs');
+      console.log(`   3. Name it "${viewName}"`);
+      console.log('   4. The system will work with any view!\n');
+    }
+  }
+
+  /**
+   * Create a project view via Claude + MCP browser automation
+   */
+  private async createViewViaBrowser(projectUrl: string, viewName: string): Promise<void> {
+    const { execSync } = await import('child_process');
+    const readline = await import('readline');
+    const { promises: fs } = await import('fs');
+    const { tmpdir } = await import('os');
+    const { join } = await import('path');
+
+    console.log('\n🤖 Using Claude to create the view via browser automation...\n');
+
+    // Step 1: Navigate and check login status
+    const checkLoginPrompt = `Please navigate to ${projectUrl} using MCP browser tools.
+
+Once there, check if you can see the project or if login is required.
+
+If login is required, respond with exactly: NEED LOGIN FROM USER
+If you can see the project, respond with: READY TO CREATE VIEW`;
+
+    const checkLoginFile = join(tmpdir(), 'claude-check-login.txt');
+    await fs.writeFile(checkLoginFile, checkLoginPrompt, 'utf-8');
+
+    console.log('🔍 Checking GitHub login status...');
+    let response = execSync(`cat "${checkLoginFile}" | claude chat`, {
+      encoding: 'utf-8',
+      maxBuffer: 10 * 1024 * 1024
+    });
+
+    // Check if login needed
+    if (response.includes('NEED LOGIN FROM USER')) {
+      console.log('\n⏸️  GitHub login required!');
+      console.log('   Please log into GitHub in the browser that just opened.');
+      console.log('   Press ENTER when you\'re logged in and can see the project...\n');
+
+      // Wait for user
+      const rl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout
+      });
+
+      await new Promise<void>((resolve) => {
+        rl.on('line', () => {
+          rl.close();
+          resolve();
+        });
+      });
+    }
+
+    // Step 2: Create the view
+    console.log('🎨 Creating the view...');
+
+    const createViewPrompt = `You should now be on the GitHub project page at ${projectUrl}.
+
+Please create a new view called "${viewName}" by following these steps:
+
+1. Look for the view tabs at the top of the project (usually shows "View 1" or similar)
+2. Click the + button next to the tabs
+3. In the dialog that appears, enter the name "${viewName}"
+4. Select "Table" layout
+5. Click "Create" or "Save"
+
+Once the view is created, respond with: VIEW CREATED SUCCESSFULLY
+
+If there are any errors, describe what went wrong.`;
+
+    const createViewFile = join(tmpdir(), 'claude-create-view.txt');
+    await fs.writeFile(createViewFile, createViewPrompt, 'utf-8');
+
+    response = execSync(`cat "${createViewFile}" | claude chat`, {
+      encoding: 'utf-8',
+      maxBuffer: 10 * 1024 * 1024
+    });
+
+    if (response.includes('VIEW CREATED SUCCESSFULLY')) {
+      console.log('✓ View created successfully!\n');
+    } else {
+      console.log('⚠️  View creation response:', response);
+      throw new Error('View creation may have failed - please check the browser');
     }
   }
 

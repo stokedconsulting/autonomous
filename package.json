@@ -35,13 +35,13 @@
   },
   "dependencies": {
     "@octokit/rest": "^20.0.2",
-    "commander": "^11.1.0",
-    "zx": "^7.2.3",
-    "winston": "^3.11.0",
-    "uuid": "^9.0.1",
-    "dotenv": "^16.3.1",
     "chalk": "^5.3.0",
-    "ora": "^7.0.1"
+    "commander": "^11.1.0",
+    "dotenv": "^16.3.1",
+    "ora": "^7.0.1",
+    "uuid": "^9.0.1",
+    "winston": "^3.11.0",
+    "zx": "^7.2.3"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

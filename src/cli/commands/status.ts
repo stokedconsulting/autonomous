@@ -46,7 +46,7 @@ async function showStatus(cwd: string, options: StatusOptions): Promise<void> {
     await assignmentManager.load();
   } catch {
     console.log(chalk.yellow('No assignments file found.'));
-    console.log('Run "autonomous start" to begin.');
+    console.log('Run "auto start" to begin.');
     return;
   }
 
@@ -61,7 +61,7 @@ async function showStatus(cwd: string, options: StatusOptions): Promise<void> {
 
   if (allAssignments.length === 0) {
     console.log(chalk.gray('No assignments yet.'));
-    console.log('Run "autonomous start" to begin processing issues.');
+    console.log('Run "auto start" to begin processing issues.');
     return;
   }
 

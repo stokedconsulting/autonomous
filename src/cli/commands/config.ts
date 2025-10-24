@@ -43,7 +43,7 @@ async function init(options: InitOptions): Promise<void> {
       console.log(chalk.blue('Configuration exists - verifying setup...\n'));
       await configManager.load();
     } else {
-      console.log(chalk.blue('Initializing autonomous configuration...\n'));
+      console.log(chalk.blue('Initializing auto configuration...\n'));
     }
 
     // Auto-detect GitHub owner/repo from git remote if not provided
@@ -71,8 +71,8 @@ async function init(options: InitOptions): Promise<void> {
       if (!githubOwner || !githubRepo) {
         console.log(chalk.yellow('\nWarning: GitHub owner/repo not set.'));
         console.log('Set them with:');
-        console.log('  autonomous config set github.owner <owner>');
-        console.log('  autonomous config set github.repo <repo>');
+        console.log('  auto config set github.owner <owner>');
+        console.log('  auto config set github.repo <repo>');
       } else {
         console.log(chalk.green(`\n✓ GitHub repository: ${githubOwner}/${githubRepo}`));
       }
@@ -98,13 +98,13 @@ async function init(options: InitOptions): Promise<void> {
 
       if (missingRequired.length > 0) {
         console.log(chalk.yellow('\n⚠️  Warning: Missing required dependencies'));
-        console.log(chalk.gray('Run: autonomous setup'));
+        console.log(chalk.gray('Run: auto setup'));
       }
 
       if (hasChangesetDir && !hasChangesetDir.installed) {
         console.log(chalk.yellow('\n💡 Tip: Install changesets for push command:'));
         console.log(chalk.gray('  pnpm add -D @changesets/cli && pnpm changeset init'));
-        console.log(chalk.gray('  Or run: autonomous setup'));
+        console.log(chalk.gray('  Or run: auto setup'));
       }
     }
 
@@ -170,7 +170,7 @@ async function init(options: InitOptions): Promise<void> {
         } else {
           console.log(chalk.gray('  No project found - using label-based workflow'));
           if (isNewConfig) {
-            console.log(chalk.dim('  (Create a project later and run: autonomous init)'));
+            console.log(chalk.dim('  (Create a project later and run: auto init)'));
           }
         }
       } catch (error) {
@@ -186,11 +186,11 @@ async function init(options: InitOptions): Promise<void> {
 
     console.log(chalk.blue('\nNext steps:'));
     console.log('1. Check/install dependencies:');
-    console.log('   autonomous setup');
+    console.log('   auto setup');
     console.log('2. Configure an LLM provider (if not auto-configured):');
-    console.log('   autonomous config add-llm claude --cli-path /path/to/claude');
+    console.log('   auto config add-llm claude --cli-path /path/to/claude');
     console.log('3. Start autonomous mode:');
-    console.log('   autonomous start');
+    console.log('   auto start');
   } catch (error) {
     console.error(chalk.red('Error initializing configuration:'), error);
     process.exit(1);
@@ -237,7 +237,7 @@ async function addLLM(provider: string, options: AddLLMOptions): Promise<void> {
     if (provider === 'claude' && !options.cliPath) {
       console.log(chalk.yellow('\nNote: Using default CLI path "claude"'));
       console.log('If Claude is installed elsewhere, set the path with:');
-      console.log(`  autonomous config set llms.${provider}.cliPath <path>`);
+      console.log(`  auto config set llms.${provider}.cliPath <path>`);
     }
 
     // Validate configuration

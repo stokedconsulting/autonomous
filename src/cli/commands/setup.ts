@@ -110,8 +110,8 @@ export async function setupCommand(options: SetupOptions): Promise<void> {
 
   console.log(chalk.green.bold('\n✓ Setup complete!\n'));
   console.log(chalk.gray('You can now use:'));
-  console.log(chalk.gray('  autonomous start     - Start autonomous issue processing'));
-  console.log(chalk.gray('  autonomous assign    - Manually assign an issue'));
-  console.log(chalk.gray('  autonomous push      - Auto-commit and push changes'));
-  console.log(chalk.gray('  autonomous status    - View current assignments'));
+  console.log(chalk.gray('  auto start     - Start autonomous issue processing'));
+  console.log(chalk.gray('  auto assign    - Manually assign an issue'));
+  console.log(chalk.gray('  auto push      - Auto-commit and push changes'));
+  console.log(chalk.gray('  auto status    - View current assignments'));
 }

@@ -57,7 +57,7 @@ export async function projectInitCommand(options: ProjectInitOptions): Promise<v
 
     if (!configExists) {
       console.error(chalk.red('✗ No .autonomous-config.json found'));
-      console.log('Run "autonomous setup" first to create base configuration.');
+      console.log('Run "auto setup" first to create base configuration.');
       process.exit(1);
     }
 
@@ -137,8 +137,8 @@ export async function projectInitCommand(options: ProjectInitOptions): Promise<v
     console.log(chalk.green('\n✓ Project integration initialized successfully!'));
     console.log(chalk.gray('\nNext steps:'));
     console.log(chalk.gray('  1. Review project configuration in .autonomous-config.json'));
-    console.log(chalk.gray('  2. Run "autonomous project status" to see project status'));
-    console.log(chalk.gray('  3. Run "autonomous project list-ready" to see ready items'));
+    console.log(chalk.gray('  2. Run "auto project status" to see project status'));
+    console.log(chalk.gray('  3. Run "auto project list-ready" to see ready items'));
   } catch (error: any) {
     console.error(chalk.red('\n✗ Error initializing project:'), error.message);
     if (error.stderr) {
@@ -160,7 +160,7 @@ export async function projectStatusCommand(options: ProjectStatusOptions): Promi
 
     if (!config.project?.enabled) {
       console.error(chalk.red('✗ Project integration is not enabled'));
-      console.log('Run "autonomous project init" first.');
+      console.log('Run "auto project init" first.');
       process.exit(1);
     }
 
@@ -282,7 +282,7 @@ export async function projectListReadyCommand(options: ProjectListReadyOptions):
 
     if (!config.project?.enabled) {
       console.error(chalk.red('✗ Project integration is not enabled'));
-      console.log('Run "autonomous project init" first.');
+      console.log('Run "auto project init" first.');
       process.exit(1);
     }
 
@@ -315,7 +315,7 @@ export async function projectListReadyCommand(options: ProjectListReadyOptions):
 
     if (evaluations.length === 0) {
       console.log(chalk.yellow('No AI evaluations found for ready items.'));
-      console.log('Run "autonomous evaluate" first to evaluate issues.');
+      console.log('Run "auto evaluate" first to evaluate issues.');
       return;
     }
 

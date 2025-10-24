@@ -46,7 +46,7 @@ export async function stopCommand(options: StopOptions): Promise<void> {
 
     console.log(chalk.green('\n✓ All instances stopped'));
     console.log(chalk.blue('\nWork sessions have been saved.'));
-    console.log('Resume with: autonomous start');
+    console.log('Resume with: auto start');
   } catch (error: any) {
     console.error(chalk.red('Error stopping autonomous mode:'), error.message);
     process.exit(1);

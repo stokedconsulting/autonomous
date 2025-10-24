@@ -39,7 +39,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
         console.log('  1. This is a git repository');
         console.log('  2. You have a GitHub remote configured (origin)');
         console.log('\nOr manually initialize with:');
-        console.log('  autonomous config init --github-owner <owner> --github-repo <repo>');
+        console.log('  auto config init --github-owner <owner> --github-repo <repo>');
         process.exit(1);
       }
 
@@ -81,7 +81,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
 
       console.log(chalk.green('✓ Configuration created and Claude enabled\n'));
       console.log(chalk.blue('Configuration saved to .autonomous-config.json'));
-      console.log(chalk.gray('You can customize settings with: autonomous config show\n'));
+      console.log(chalk.gray('You can customize settings with: auto config show\n'));
     } else {
       // Load existing configuration
       console.log('Loading configuration...');
@@ -95,7 +95,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
       validation.errors.forEach((error) => {
         console.log(chalk.red(`  - ${error}`));
       });
-      console.log(chalk.yellow('\nRun "autonomous config validate" for more details'));
+      console.log(chalk.yellow('\nRun "auto config validate" for more details'));
       process.exit(1);
     }
 

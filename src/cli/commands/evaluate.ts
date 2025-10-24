@@ -130,8 +130,8 @@ export async function evaluateCommand(options: EvaluateOptions): Promise<void> {
     }
 
     console.log('\n' + chalk.green('✓ Evaluation complete!'));
-    console.log(chalk.dim('\nRun "autonomous project list-ready" to see prioritized issues'));
-    console.log(chalk.dim('Or run "autonomous start" to begin autonomous processing'));
+    console.log(chalk.dim('\nRun "auto project list-ready" to see prioritized issues'));
+    console.log(chalk.dim('Or run "auto start" to begin autonomous processing'));
 
   } catch (error) {
     console.error(chalk.red('\n✗ Evaluation failed:'));
