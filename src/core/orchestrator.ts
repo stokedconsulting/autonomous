@@ -5,11 +5,15 @@
 import { ConfigManager } from './config-manager.js';
 import { AssignmentManager } from './assignment-manager.js';
 import { WorktreeManager } from '../git/worktree-manager.js';
+import { IssueEvaluator } from './issue-evaluator.js';
 import { GitHubAPI } from '../github/api.js';
+import { GitHubProjectsAPI } from '../github/projects-api.js';
+import { ProjectFieldMapper } from '../github/project-field-mapper.js';
+import { ProjectAwarePrioritizer } from './project-aware-prioritizer.js';
 import { LLMAdapter } from '../llm/adapter.js';
 import { ClaudeAdapter } from '../llm/claude-adapter.js';
 import { PromptBuilder } from '../llm/prompt-builder.js';
-import { LLMProvider, Assignment } from '../types/index.js';
+import { LLMProvider, Assignment, Issue } from '../types/index.js';
 import { promises as fs } from 'fs';
 import { join } from 'path';
 import chalk from 'chalk';
@@ -18,16 +22,30 @@ export class Orchestrator {
   private configManager: ConfigManager;
   private assignmentManager: AssignmentManager;
   private worktreeManager: WorktreeManager;
+  private issueEvaluator: IssueEvaluator;
   private githubAPI: GitHubAPI | null = null;
+  private projectsAPI: GitHubProjectsAPI | null = null;
+  private fieldMapper: ProjectFieldMapper | null = null;
+  private prioritizer: ProjectAwarePrioritizer | null = null;
   private adapters = new Map<LLMProvider, LLMAdapter>();
   private autonomousDataDir: string;
+  private projectPath: string;
   private isRunning = false;
+  private verbose: boolean;
+  private logMonitors = new Map<string, any>(); // Store tail processes
 
-  constructor(projectPath: string, configManager: ConfigManager, assignmentManager: AssignmentManager) {
+  constructor(projectPath: string, configManager: ConfigManager, assignmentManager: AssignmentManager, verbose: boolean = false) {
+    this.projectPath = projectPath;
     this.configManager = configManager;
     this.assignmentManager = assignmentManager;
     this.worktreeManager = new WorktreeManager(projectPath);
     this.autonomousDataDir = join(projectPath, '.autonomous');
+    this.verbose = verbose;
+
+    // Issue evaluator will be initialized in initialize() after githubAPI is ready
+    const config = configManager.getConfig();
+    const claudePath = config.llms?.claude?.cliPath || 'claude';
+    this.issueEvaluator = new IssueEvaluator(projectPath, claudePath); // Temporary, will be re-initialized
   }
 
   /**
@@ -46,6 +64,25 @@ export class Orchestrator {
     }
 
     this.githubAPI = new GitHubAPI(githubToken, config.github.owner, config.github.repo);
+
+    // Re-initialize issue evaluator with GitHubAPI
+    const claudePath = config.llms?.claude?.cliPath || 'claude';
+    this.issueEvaluator = new IssueEvaluator(this.projectPath, claudePath, this.githubAPI);
+
+    // Initialize GitHub Projects v2 integration if enabled
+    if (config.project?.enabled) {
+      const projectId = process.env.GITHUB_PROJECT_ID || 'PVT_kwDOBW_6Ns4BGTch'; // TODO: Store in config
+      this.projectsAPI = new GitHubProjectsAPI(projectId, config.project);
+      this.fieldMapper = new ProjectFieldMapper(this.projectsAPI, config.project);
+      this.prioritizer = new ProjectAwarePrioritizer(config.project, this.fieldMapper);
+
+      // Re-initialize assignment manager with project API for conflict detection
+      this.assignmentManager = new AssignmentManager(this.projectPath, {
+        projectAPI: this.projectsAPI,
+      });
+
+      console.log(chalk.green('✓ GitHub Projects v2 integration enabled'));
+    }
 
     // Verify git repository
     const isGitRepo = await this.worktreeManager.validateGitRepo();
@@ -93,8 +130,99 @@ export class Orchestrator {
 
     console.log(chalk.green(`Found ${issues.length} available issue(s)`));
 
-    // Assign issues to LLM instances
-    await this.assignIssues(issues);
+    // Evaluate and prioritize issues
+    const { evaluated, skipped } = await this.issueEvaluator.evaluateIssues(issues, {
+      verbose: this.verbose,
+    });
+
+    // Report on skipped issues
+    if (skipped.length > 0) {
+      console.log(chalk.yellow('\n⚠️  Issues needing more detail:'));
+      for (const issue of skipped) {
+        const evaluation = this.issueEvaluator.getEvaluation(issue.number);
+        console.log(chalk.gray(`  #${issue.number}: ${issue.title}`));
+        if (evaluation?.suggestedQuestions && evaluation.suggestedQuestions.length > 0) {
+          console.log(chalk.gray(`    Suggested questions:`));
+          evaluation.suggestedQuestions.slice(0, 2).forEach((q) => {
+            console.log(chalk.gray(`      - ${q}`));
+          });
+        }
+      }
+      console.log();
+    }
+
+    if (evaluated.length === 0) {
+      console.log(chalk.yellow('No issues have enough detail for autonomous implementation.'));
+      console.log('Please add more details to issues or answer the suggested questions above.');
+      return;
+    }
+
+    // Use hybrid prioritization if project integration is enabled
+    let issuesForAssignment: Issue[];
+
+    if (this.prioritizer && this.fieldMapper) {
+      console.log(chalk.blue('\n🎯 Calculating hybrid priorities (AI + Project)...'));
+
+      // Get project metadata for all evaluated issues
+      const issueNumbers = evaluated.map((e) => e.issueNumber);
+      const projectMetadata = await this.fieldMapper.getMetadataForIssues(issueNumbers);
+
+      // Calculate hybrid priorities
+      const prioritized = this.prioritizer.prioritizeIssues(evaluated, projectMetadata);
+
+      // Filter to only ready items (if using project status)
+      const readyItems = this.prioritizer.filterReadyIssues(prioritized, projectMetadata);
+
+      if (readyItems.length === 0) {
+        console.log(chalk.yellow('No issues are in "Ready" status in the project.'));
+        console.log('Please move issues to "Ready" status in the project board.');
+        return;
+      }
+
+      console.log(chalk.blue('\n📊 Hybrid Priority Ranking:'));
+      readyItems.slice(0, 5).forEach((item, idx) => {
+        const ctx = item.context;
+        console.log(
+          chalk.cyan(
+            `  ${idx + 1}. #${item.issueNumber} (Hybrid: ${item.hybridScore.toFixed(2)}) - ${ctx.projectPriority || 'No Priority'} - ${ctx.projectSize || 'No Size'}`
+          )
+        );
+        console.log(chalk.gray(`     ${item.issueTitle}`));
+        if (this.verbose) {
+          console.log(
+            chalk.gray(
+              `     AI: ${ctx.aiPriorityScore.toFixed(1)} | Project: ${ctx.projectPriority || 'N/A'} | Sprint: ${ctx.projectSprint?.title || 'N/A'}`
+            )
+          );
+        }
+      });
+      console.log();
+
+      // Convert back to issues
+      issuesForAssignment = readyItems.map((item) =>
+        issues.find((i) => i.number === item.issueNumber)
+      ).filter((i): i is Issue => i !== undefined);
+    } else {
+      // Fallback to AI-only prioritization
+      // Issues are already sorted by AI priority from the evaluator
+      issuesForAssignment = evaluated.map((evaluation) =>
+        issues.find((i) => i.number === evaluation.issueNumber)
+      ).filter((i): i is Issue => i !== undefined);
+
+      console.log(chalk.blue('\n📊 AI Priority Ranking:'));
+      evaluated.slice(0, 5).forEach((evaluation, idx) => {
+        console.log(
+          chalk.cyan(
+            `  ${idx + 1}. #${evaluation.issueNumber} (AI: ${evaluation.scores.aiPriorityScore.toFixed(1)}/10) - ${evaluation.classification.complexity} complexity - ${evaluation.estimatedEffort}`
+          )
+        );
+        console.log(chalk.gray(`     ${evaluation.issueTitle}`));
+      });
+      console.log();
+    }
+
+    // Assign issues to LLM instances (starting with highest priority)
+    await this.assignIssues(issuesForAssignment);
 
     // Start monitoring loop
     this.startMonitoringLoop();
@@ -105,6 +233,16 @@ export class Orchestrator {
    */
   async stop(): Promise<void> {
     this.isRunning = false;
+
+    // Stop all log monitors
+    for (const monitor of this.logMonitors.values()) {
+      try {
+        monitor.kill();
+      } catch (error) {
+        // Ignore errors when killing monitors
+      }
+    }
+    this.logMonitors.clear();
 
     // Stop all running LLM instances
     for (const [provider, adapter] of this.adapters) {
@@ -228,8 +366,14 @@ export class Orchestrator {
       branchName,
       requiresTests: config.requirements.testingRequired,
       requiresCI: config.requirements.ciMustPass,
-      labels: issue.labels.map((l: any) => l.name),
+      // NOTE: labels removed - read from GitHub/project instead
     });
+
+    // Link assignment to project item if project integration enabled
+    if (this.projectsAPI) {
+      await this.assignmentManager.ensureProjectItemId(assignment.id);
+      console.log(chalk.gray('✓ Linked to project'));
+    }
 
     // Generate initial prompt
     const prompt = PromptBuilder.buildInitialPrompt({
@@ -250,10 +394,14 @@ export class Orchestrator {
       workingDirectory: worktreePath,
     });
 
-    // Update assignment status
-    await this.assignmentManager.updateAssignment(assignment.id, {
-      status: 'in-progress',
-    });
+    // Update assignment status (with project sync if enabled)
+    if (this.projectsAPI) {
+      await this.assignmentManager.updateStatusWithSync(assignment.id, 'in-progress');
+    } else {
+      await this.assignmentManager.updateAssignment(assignment.id, {
+        status: 'in-progress',
+      });
+    }
 
     // Add work session
     await this.assignmentManager.addWorkSession(assignment.id, {
@@ -262,6 +410,11 @@ export class Orchestrator {
     });
 
     console.log(chalk.green(`✓ Assignment created and ${provider} instance started`));
+
+    // Start log monitoring in verbose mode
+    if (this.verbose && assignment.llmInstanceId) {
+      await this.startLogMonitoring(assignment.llmInstanceId, issue.number);
+    }
   }
 
   /**
@@ -341,5 +494,50 @@ export class Orchestrator {
    */
   private sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /**
+   * Start monitoring a log file and stream output
+   */
+  private async startLogMonitoring(instanceId: string, issueNumber: number): Promise<void> {
+    const logFile = join(this.autonomousDataDir, `output-${instanceId}.log`);
+
+    // Wait a moment for the log file to be created
+    await this.sleep(1000);
+
+    try {
+      // Check if log file exists
+      await fs.access(logFile);
+
+      // Import spawn dynamically
+      const { spawn } = await import('child_process');
+
+      console.log(chalk.blue(`\n┌─ Issue #${issueNumber} (${instanceId}) ─────────────────────────────`));
+      console.log(chalk.blue('│'));
+
+      // Start tailing the log file
+      const tail = spawn('tail', ['-f', logFile]);
+
+      tail.stdout.on('data', (data) => {
+        const lines = data.toString().split('\n');
+        lines.forEach((line: string) => {
+          if (line.trim()) {
+            console.log(chalk.blue('│ ') + line);
+          }
+        });
+      });
+
+      tail.stderr.on('data', (data) => {
+        console.error(chalk.red('│ ERROR: ') + data.toString());
+      });
+
+      tail.on('close', () => {
+        console.log(chalk.blue('└────────────────────────────────────────────────────────────'));
+      });
+
+      this.logMonitors.set(instanceId, tail);
+    } catch (error) {
+      console.warn(chalk.yellow(`Could not start monitoring log for ${instanceId}: ${error}`));
+    }
   }
 }
