@@ -22,6 +22,7 @@ export interface GitHubConfig {
   labels?: string[];
   excludeLabels?: string[];
   assignToSelf?: boolean;
+  botUsername?: string; // GitHub username to assign autonomous work to (e.g., "claude-bot")
 }
 
 export interface WorktreeConfig {
@@ -103,6 +104,10 @@ export interface ProjectConfig {
     sprint?: {
       fieldName: string; // Usually "Sprint"
       currentSprint?: string; // Name/ID of current sprint for boost
+    };
+    assignedInstance?: {
+      fieldName: string; // Usually "Assigned Instance" or "LLM Worker"
+      // Values are auto-generated as {provider}-{slotNumber}, e.g., "claude-1", "gemini-2"
     };
   };
 

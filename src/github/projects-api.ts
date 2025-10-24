@@ -632,6 +632,80 @@ export class GitHubProjectsAPI implements ProjectAPI {
   }
 
   /**
+   * Update a text field value
+   */
+  async updateItemTextField(
+    projectItemId: string,
+    fieldName: string,
+    value: string | null
+  ): Promise<void> {
+    const fieldId = await this.getFieldId(fieldName);
+
+    if (!fieldId) {
+      throw new Error(`Field "${fieldName}" not found in project`);
+    }
+
+    const mutation = `
+      mutation {
+        updateProjectV2ItemFieldValue(input: {
+          projectId: "${this.projectId}"
+          itemId: "${projectItemId}"
+          fieldId: "${fieldId}"
+          value: {
+            text: ${value ? `"${value.replace(/"/g, '\\"')}"` : 'null'}
+          }
+        }) {
+          projectV2Item {
+            id
+          }
+        }
+      }
+    `;
+
+    await this.graphql(mutation);
+  }
+
+  /**
+   * Update assigned instance field (text or single-select)
+   * Auto-detects field type and uses appropriate update method
+   */
+  async updateAssignedInstance(
+    projectItemId: string,
+    instanceId: string | null
+  ): Promise<void> {
+    const fieldName = this.config.fields.assignedInstance?.fieldName;
+    if (!fieldName) {
+      // Field not configured, skip silently
+      return;
+    }
+
+    const fields = await this.getFields();
+    const field = fields.find((f) => f.name === fieldName);
+
+    if (!field) {
+      console.warn(`Assigned instance field "${fieldName}" not found in project`);
+      return;
+    }
+
+    // Handle based on field type
+    if (field.dataType === 'TEXT') {
+      await this.updateItemTextField(projectItemId, fieldName, instanceId);
+    } else if (field.dataType === 'SINGLE_SELECT') {
+      // For single-select, the instanceId must match an existing option
+      if (instanceId) {
+        await this.updateItemFieldValue(projectItemId, fieldName, instanceId);
+      } else {
+        // Cannot clear single-select fields directly, would need to implement clearFieldValue
+        console.warn(`Cannot clear single-select field "${fieldName}"`);
+      }
+    } else {
+      throw new Error(
+        `Field "${fieldName}" has unsupported type ${field.dataType} for assigned instance tracking`
+      );
+    }
+  }
+
+  /**
    * Clear field cache (useful for testing or when fields change)
    */
   clearCache(): void {

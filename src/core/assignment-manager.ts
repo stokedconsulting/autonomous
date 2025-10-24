@@ -387,6 +387,46 @@ export class AssignmentManager {
   }
 
   /**
+   * Update assigned instance with sync to project
+   * Updates the "Assigned Instance" field in the project to track which LLM instance is working
+   */
+  async updateAssignedInstanceWithSync(
+    assignmentId: string,
+    instanceId: string | null
+  ): Promise<void> {
+    if (!this.data) {
+      throw new Error('Assignment manager not initialized');
+    }
+
+    const assignment = this.data.assignments.find((a) => a.id === assignmentId);
+    if (!assignment) {
+      throw new Error(`Assignment ${assignmentId} not found`);
+    }
+
+    // Sync to project if API available and assignment has projectItemId
+    if (this.projectAPI && assignment.projectItemId) {
+      try {
+        // Check if projectAPI has the updateAssignedInstance method
+        if ('updateAssignedInstance' in this.projectAPI) {
+          await (this.projectAPI as any).updateAssignedInstance(
+            assignment.projectItemId,
+            instanceId
+          );
+          this.logger.info(
+            `Updated assigned instance to "${instanceId || '(none)'}" for #${assignment.issueNumber}`
+          );
+        }
+      } catch (error) {
+        this.logger.error(
+          `Failed to update assigned instance in project for #${assignment.issueNumber}: ` +
+            `${error instanceof Error ? error.message : String(error)}`
+        );
+        // Don't throw - this is a nice-to-have feature
+      }
+    }
+  }
+
+  /**
    * Ensure assignment has projectItemId
    * Fetches from project API if not set
    */

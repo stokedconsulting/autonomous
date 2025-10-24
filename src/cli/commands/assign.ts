@@ -14,6 +14,7 @@ import { PromptBuilder } from '../../llm/prompt-builder.js';
 import { ClaudeAdapter } from '../../llm/claude-adapter.js';
 import { getGitHubToken } from '../../utils/github-token.js';
 import { resolveProjectIdOrExit } from '../../github/project-resolver.js';
+import { InstanceManager } from '../../core/instance-manager.js';
 import { join } from 'path';
 import { promises as fs } from 'fs';
 
@@ -57,6 +58,14 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
       projectAPI: projectsAPI || undefined,
     });
     await assignmentManager.initialize(projectName, cwd);
+
+    // Initialize instance manager for slot-based naming
+    const maxSlots = {
+      claude: config.llms.claude.maxConcurrentIssues,
+      gemini: config.llms.gemini.maxConcurrentIssues,
+      codex: config.llms.codex.maxConcurrentIssues,
+    };
+    const instanceManager = new InstanceManager(assignmentManager, maxSlots);
 
     // Check if issue is already assigned
     if (assignmentManager.isIssueAssigned(issueNum)) {
@@ -156,6 +165,22 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
       console.log(chalk.green(`✓ Worktree created: ${worktreePath}`));
     }
 
+    // Get next available instance slot
+    console.log(chalk.blue('\n🔍 Finding available instance slot...'));
+    const availableSlot = instanceManager.getNextAvailableSlot('claude');
+
+    if (!availableSlot) {
+      console.error(
+        chalk.red(
+          `✗ No available Claude instances (max: ${config.llms.claude.maxConcurrentIssues})`
+        )
+      );
+      console.log(chalk.yellow('Try increasing maxConcurrentIssues in .autonomous-config.json'));
+      process.exit(1);
+    }
+
+    console.log(chalk.green(`✓ Assigned to slot: ${availableSlot.instanceId}`));
+
     // Create assignment
     console.log(chalk.blue('\n📝 Creating assignment...'));
     const assignment = await assignmentManager.createAssignment({
@@ -170,10 +195,22 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
       // NOTE: labels removed - read from GitHub/project instead
     });
 
+    // Update assignment with slot-based instance ID
+    await assignmentManager.updateAssignment(assignment.id, {
+      llmInstanceId: availableSlot.instanceId,
+    });
+    assignment.llmInstanceId = availableSlot.instanceId; // Update in-memory reference
+
     // Link assignment to project item if project integration enabled
     if (projectsAPI) {
       await assignmentManager.ensureProjectItemId(assignment.id);
       console.log(chalk.gray('✓ Linked to project'));
+
+      // Update assigned instance field in project
+      await assignmentManager.updateAssignedInstanceWithSync(
+        assignment.id,
+        availableSlot.instanceId
+      );
     }
 
     // Generate initial prompt

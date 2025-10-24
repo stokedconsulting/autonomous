@@ -84,6 +84,7 @@ export interface UpdateAssignmentInput {
   prUrl?: string;
   ciStatus?: 'pending' | 'success' | 'failure' | null;
   lastActivity?: string;
+  llmInstanceId?: string; // Allow updating instance ID for slot-based naming
 }
 
 export interface AddWorkSessionInput {
