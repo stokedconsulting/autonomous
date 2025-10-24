@@ -63,6 +63,7 @@ config
   .description('Initialize configuration in the current project')
   .option('--github-owner <owner>', 'GitHub repository owner')
   .option('--github-repo <repo>', 'GitHub repository name')
+  .option('--no-project', 'Disable project integration (enabled by default if project exists)')
   .option('--interactive', 'Interactive configuration setup')
   .action(configCommand.init);
 

@@ -11,6 +11,7 @@ import chalk from 'chalk';
 interface InitOptions {
   githubOwner?: string;
   githubRepo?: string;
+  project?: boolean; // Commander converts --no-project to project: false
   interactive?: boolean;
 }
 
@@ -92,32 +93,74 @@ async function init(options: InitOptions): Promise<void> {
       console.log(chalk.gray('  Or run: autonomous setup'));
     }
 
-    // Create Autonomous view if project integration is enabled
+    // Auto-detect and enable project integration (unless --no-project)
     await configManager.load();
     const config = configManager.getConfig();
 
-    if (config.project?.enabled && githubOwner && githubRepo) {
-      console.log(chalk.blue('\n📊 Setting up GitHub Project...'));
+    if (options.project !== false && githubOwner && githubRepo) {
+      console.log(chalk.blue('\n📊 Checking for GitHub Project...'));
 
       try {
         const { resolveProjectId } = await import('../../github/project-resolver.js');
         const projectId = await resolveProjectId(githubOwner, githubRepo, false);
 
         if (projectId) {
+          console.log(chalk.green('✓ Found project - enabling integration'));
+
+          // Add project configuration with sensible defaults
+          config.project = {
+            enabled: true,
+            projectNumber: 0, // Will be resolved dynamically
+            organizationProject: true, // Assume org project (can be overridden)
+            fields: {
+              status: {
+                fieldName: 'Status',
+                readyValues: ['Todo', 'Ready'],
+                inProgressValue: 'In Progress',
+                reviewValue: 'In Review',
+                doneValue: 'Done',
+                blockedValue: 'Blocked',
+              },
+              priority: {
+                fieldName: 'Priority',
+                values: {
+                  '🔴 Critical': { weight: 10 },
+                  '🟠 High': { weight: 7 },
+                  '🟡 Medium': { weight: 5 },
+                  '🟢 Low': { weight: 3 },
+                },
+              },
+              size: {
+                fieldName: 'Size',
+                preferredSizes: ['S', 'M'],
+              },
+              assignedInstance: {
+                fieldName: 'Assigned Instance',
+              },
+            },
+          };
+
+          await configManager.save();
+          console.log(chalk.green('✓ Project integration enabled'));
+
+          // Create Autonomous view
           const { GitHubProjectsAPI } = await import('../../github/projects-api.js');
           const projectsAPI = new GitHubProjectsAPI(projectId, config.project);
           await projectsAPI.ensureAutonomousView();
-          console.log(chalk.green('✓ GitHub Project view configured'));
+          console.log(chalk.green('✓ Autonomous view created'));
         } else {
-          console.log(chalk.yellow('⚠️  No GitHub Project found - skipping view creation'));
-          console.log(chalk.gray('   Create a project first, then run: autonomous evaluate'));
+          console.log(chalk.gray('  No project found - using label-based workflow'));
+          console.log(chalk.dim('  (Create a project later and run: autonomous config init)'));
         }
       } catch (error) {
-        console.log(chalk.yellow('⚠️  Could not create project view (you can do this later)'));
+        console.log(chalk.yellow('⚠️  Could not setup project integration'));
         if (error instanceof Error) {
           console.log(chalk.gray(`   ${error.message}`));
         }
+        console.log(chalk.gray('  Falling back to label-based workflow'));
       }
+    } else if (options.project === false) {
+      console.log(chalk.gray('\n  Project integration disabled (--no-project)'));
     }
 
     console.log(chalk.blue('\nNext steps:'));
