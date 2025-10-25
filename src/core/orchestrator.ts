@@ -537,13 +537,29 @@ export class Orchestrator {
 
   /**
    * Monitoring loop
+   * Checks for completion via hooks (primary) and dead processes (fallback)
+   * Syncs from GitHub periodically to detect manual status changes
    */
   private async startMonitoringLoop(): Promise<void> {
     console.log(chalk.blue('\nStarting monitoring loop...\n'));
+    console.log(chalk.gray('  Checking for completion every 60s'));
+    console.log(chalk.gray('  Syncing from GitHub every 5m\n'));
+
+    let cycleCount = 0;
 
     while (this.isRunning) {
       try {
         await this.checkAssignments();
+
+        // Sync from GitHub every 5 minutes (5 cycles) to detect manual changes
+        cycleCount++;
+        if (cycleCount >= 5) {
+          if (this.verbose) {
+            console.log(chalk.gray('\n  🔄 Periodic sync from GitHub...'));
+          }
+          await this.assignmentManager.syncStatusFromGitHub();
+          cycleCount = 0;
+        }
       } catch (error) {
         console.error(
           chalk.yellow('⚠️  Error in monitoring loop (will retry):'),
@@ -553,7 +569,7 @@ export class Orchestrator {
           console.error(chalk.gray('Stack trace:'), error);
         }
       }
-      await this.sleep(10000); // Check every 10 seconds
+      await this.sleep(60000); // Check every 60 seconds (hooks handle immediate completion)
     }
   }
 

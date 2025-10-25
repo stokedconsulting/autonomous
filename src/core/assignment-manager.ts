@@ -279,38 +279,49 @@ export class AssignmentManager {
   }
 
   /**
-   * Get active assignments count for a provider
-   * If project API is available, syncs status from GitHub first
+   * Get count of active assignments (assigned or in-progress)
+   * NOTE: This trusts the local database and does NOT sync from GitHub.
+   * Use syncStatusFromGitHub() separately if you need to detect manual status changes.
    */
   async getActiveAssignmentsCount(provider: LLMProvider): Promise<number> {
     if (!this.data) return 0;
 
-    // If project API available, sync status from GitHub for each assignment
-    if (this.projectAPI) {
-      for (const assignment of this.data.assignments) {
-        if (assignment.llmProvider === provider && assignment.projectItemId) {
-          try {
-            const projectStatus = await this.projectAPI.getItemStatus(assignment.projectItemId);
-            // Only update if status is mapped (not null) and differs from current
-            // Null means status is "Needs more info", "Evaluated", etc - don't count these
-            if (projectStatus !== null && projectStatus !== assignment.status) {
-              assignment.status = projectStatus;
-              assignment.lastActivity = new Date().toISOString();
-            }
-          } catch (error) {
-            // If can't fetch status, use cached value
-            this.logger?.warn(`Could not sync status for assignment ${assignment.id}: ${error}`);
-          }
-        }
-      }
-      // Save any status changes
-      await this.save();
-    }
-
     // Count only assignments that are actually active (assigned or in-progress)
+    // Trust local database - hooks will update status when work completes
     return this.data.assignments.filter(
       (a) => a.llmProvider === provider && (a.status === 'assigned' || a.status === 'in-progress')
     ).length;
+  }
+
+  /**
+   * Sync status from GitHub for all assignments (expensive operation)
+   * Only call this periodically to detect manual status changes
+   */
+  async syncStatusFromGitHub(provider?: LLMProvider): Promise<void> {
+    if (!this.data || !this.projectAPI) return;
+
+    const assignments = provider
+      ? this.data.assignments.filter(a => a.llmProvider === provider)
+      : this.data.assignments;
+
+    for (const assignment of assignments) {
+      if (assignment.projectItemId) {
+        try {
+          const projectStatus = await this.projectAPI.getItemStatus(assignment.projectItemId);
+          // Only update if status is mapped (not null) and differs from current
+          if (projectStatus !== null && projectStatus !== assignment.status) {
+            assignment.status = projectStatus;
+            assignment.lastActivity = new Date().toISOString();
+            this.logger?.info(`Synced status from GitHub for #${assignment.issueNumber}: ${projectStatus}`);
+          }
+        } catch (error) {
+          // If can't fetch status, keep cached value
+          this.logger?.warn(`Could not sync status for assignment ${assignment.id}: ${error}`);
+        }
+      }
+    }
+    // Save any status changes
+    await this.save();
   }
 
   /**
