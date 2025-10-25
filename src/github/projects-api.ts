@@ -763,6 +763,42 @@ export class GitHubProjectsAPI implements ProjectAPI {
   }
 
   /**
+   * Get a single-select field value
+   */
+  async getItemSelectFieldValue(
+    projectItemId: string,
+    fieldName: string
+  ): Promise<string | null> {
+    const query = `
+      query {
+        node(id: "${projectItemId}") {
+          ... on ProjectV2Item {
+            fieldValueByName(name: "${fieldName}") {
+              ... on ProjectV2ItemFieldSingleSelectValue {
+                name
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    try {
+      const result = await this.graphql<{
+        node: {
+          fieldValueByName: {
+            name: string;
+          } | null;
+        };
+      }>(query);
+
+      return result.node.fieldValueByName?.name || null;
+    } catch (error) {
+      return null;
+    }
+  }
+
+  /**
    * Update assigned instance field (text or single-select)
    * Auto-detects field type and uses appropriate update method
    */

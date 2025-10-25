@@ -255,6 +255,23 @@ export class GitHubAPI {
   }
 
   /**
+   * Get files changed in a pull request
+   */
+  async getPullRequestFiles(prNumber: number): Promise<Array<{ filename: string; status: string }>> {
+    const { data } = await this.octokit.pulls.listFiles({
+      owner: this.owner,
+      repo: this.repo,
+      pull_number: prNumber,
+      per_page: 100,
+    });
+
+    return data.map(file => ({
+      filename: file.filename,
+      status: file.status,
+    }));
+  }
+
+  /**
    * Close an issue
    */
   async closeIssue(issueNumber: number): Promise<void> {

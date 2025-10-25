@@ -166,20 +166,29 @@ export class IssueEvaluator {
               );
             }
 
-            // Update project status to "Evaluated" if project integration is enabled
+            // Update project status and effort if project integration is enabled
             if (this.projectsAPI) {
               try {
                 const projectItemId = await this.projectsAPI.getProjectItemIdByIssue(issue.number);
                 if (projectItemId) {
+                  // Update status to "Evaluated"
                   const statusConfig = (this.projectsAPI as any).config.fields.status;
                   await this.projectsAPI.updateItemStatusByValue(projectItemId, statusConfig.evaluatedValue);
                   if (verbose) {
                     console.log(chalk.gray(`     ✓ Updated project status to "${statusConfig.evaluatedValue}"`));
                   }
+
+                  // Update Effort field with estimated effort
+                  if (evaluation.estimatedEffort) {
+                    await this.projectsAPI.updateItemTextField(projectItemId, 'Effort', evaluation.estimatedEffort);
+                    if (verbose) {
+                      console.log(chalk.gray(`     ✓ Set effort estimate: ${evaluation.estimatedEffort}`));
+                    }
+                  }
                 }
               } catch (error: any) {
                 if (verbose) {
-                  console.log(chalk.gray(`     ⚠️  Failed to update project status: ${error.message}`));
+                  console.log(chalk.gray(`     ⚠️  Failed to update project fields: ${error.message}`));
                 }
               }
             }
@@ -226,6 +235,21 @@ export class IssueEvaluator {
                   await this.projectsAPI.updateItemStatusByValue(projectItemId, statusConfig.needsMoreInfoValue);
                   if (verbose) {
                     console.log(chalk.gray(`     ✓ Updated project status to "${statusConfig.needsMoreInfoValue}"`));
+                  }
+
+                  // Add "question" label for issues needing more info
+                  if (this.githubAPI) {
+                    try {
+                      await this.githubAPI.addLabels(issue.number, ['question']);
+                      if (verbose) {
+                        console.log(chalk.gray(`     ✓ Added "question" label`));
+                      }
+                    } catch (error: any) {
+                      // Non-critical, just log
+                      if (verbose) {
+                        console.log(chalk.gray(`     ⚠️  Could not add question label: ${error.message}`));
+                      }
+                    }
                   }
                 }
               } catch (error: any) {

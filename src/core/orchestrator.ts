@@ -629,6 +629,9 @@ export class Orchestrator {
         if (this.projectsAPI) {
           await this.assignmentManager.updateStatusWithSync(assignment.id, 'llm-complete');
           await this.assignmentManager.updateAssignment(assignment.id, updates);
+
+          // Add labels based on Work Type and changes
+          await this.addCompletionLabels(assignment.issueNumber, assignment.projectItemId, prNumber);
         } else {
           await this.assignmentManager.updateAssignment(assignment.id, {
             ...updates,
@@ -835,6 +838,66 @@ export class Orchestrator {
 
     const diffDays = Math.floor(diffHours / 24);
     return `${diffDays}d ago`;
+  }
+
+  /**
+   * Add labels to issue based on Work Type and changes made
+   */
+  private async addCompletionLabels(
+    issueNumber: number,
+    projectItemId: string | undefined,
+    prNumber: number | undefined
+  ): Promise<void> {
+    if (!this.projectsAPI || !this.githubAPI || !projectItemId) {
+      return;
+    }
+
+    try {
+      const labelsToAdd: string[] = [];
+
+      // Get Work Type from project
+      const workType = await this.projectsAPI.getItemSelectFieldValue(projectItemId, 'Work Type');
+
+      // Map Work Type to label
+      if (workType) {
+        if (workType.includes('Bug')) {
+          labelsToAdd.push('bug');
+        } else if (workType.includes('Feature') || workType.includes('Enhancement')) {
+          labelsToAdd.push('enhancement');
+        }
+      }
+
+      // Check if documentation was modified (if PR exists)
+      if (prNumber) {
+        try {
+          const files = await this.githubAPI.getPullRequestFiles(prNumber);
+
+          // Check if any .md files or docs folders were modified
+          const hasDocChanges = files.some(file =>
+            file.filename.endsWith('.md') ||
+            file.filename.includes('/docs/') ||
+            file.filename.includes('README')
+          );
+
+          if (hasDocChanges) {
+            labelsToAdd.push('documentation');
+          }
+        } catch (error) {
+          // PR not yet created or error fetching - skip
+        }
+      }
+
+      // Add labels if we have any
+      if (labelsToAdd.length > 0) {
+        await this.githubAPI.addLabels(issueNumber, labelsToAdd);
+        console.log(chalk.gray(`   ✓ Added labels: ${labelsToAdd.join(', ')}`));
+      }
+    } catch (error) {
+      // Non-critical - log but don't fail
+      if (this.verbose) {
+        console.log(chalk.gray(`   ⚠️  Could not add labels: ${error instanceof Error ? error.message : String(error)}`));
+      }
+    }
   }
 
   /**
