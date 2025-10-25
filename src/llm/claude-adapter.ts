@@ -213,6 +213,22 @@ Started: ${new Date().toISOString()}
       // No activity log yet - Claude hasn't used any tools
     }
 
+    // Fallback: Check if process is actually running (in case hook didn't run)
+    const { isProcessRunning } = await import('../utils/process.js');
+    const processRunning = await isProcessRunning(instance.processId);
+
+    if (!processRunning) {
+      // Process ended but hook didn't create session file
+      return {
+        instanceId,
+        provider: 'claude',
+        isRunning: false,
+        startedAt: instance.startedAt,
+        lastActivity,
+        processId: instance.processId,
+      };
+    }
+
     return {
       instanceId,
       provider: 'claude',
