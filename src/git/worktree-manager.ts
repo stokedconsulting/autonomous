@@ -28,6 +28,8 @@ export class WorktreeManager {
 
   constructor(projectPath: string) {
     this.projectPath = projectPath;
+    // Suppress zx command echoing for cleaner output
+    $.verbose = false;
   }
 
   /**
@@ -40,16 +42,45 @@ export class WorktreeManager {
     const worktreeName = `${projectName}-issue-${issueNumber}`;
     const worktreePath = resolve(this.projectPath, baseDir, worktreeName);
 
-    // Check if worktree already exists
-    const exists = await this.worktreeExists(worktreePath);
-    if (exists) {
-      // Worktree exists - remove it and recreate
-      // This handles cases where a previous run was interrupted
-      console.log(`Worktree already exists at ${worktreePath}, removing and recreating...`);
+    // Check if directory exists on disk (regardless of git status)
+    let directoryExists = false;
+    try {
+      await fs.access(worktreePath);
+      directoryExists = true;
+    } catch {
+      directoryExists = false;
+    }
+
+    // If directory exists, remove it
+    if (directoryExists) {
+      console.log(`Directory already exists at ${worktreePath}, removing...`);
+      
+      // Check if git knows about this worktree
+      const worktrees = await this.listWorktrees();
+      const gitKnowsAboutIt = worktrees.some((w) => w.path === worktreePath);
+      
+      if (gitKnowsAboutIt) {
+        // Use proper git removal
+        try {
+          await this.removeWorktree(worktreePath, true);
+        } catch (error) {
+          throw new Error(`Failed to remove existing worktree at ${worktreePath}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      } else {
+        // Directory exists but git doesn't know about it - orphaned directory
+        console.log(`Orphaned directory detected, forcing removal...`);
+        try {
+          await $`rm -rf ${worktreePath}`;
+        } catch (error) {
+          throw new Error(`Failed to remove orphaned directory at ${worktreePath}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+      
+      // Prune stale worktree administrative files
       try {
-        await this.removeWorktree(worktreePath, true); // force remove
-      } catch (error) {
-        throw new Error(`Failed to remove existing worktree at ${worktreePath}: ${error instanceof Error ? error.message : String(error)}`);
+        await $`cd ${this.projectPath} && git worktree prune`;
+      } catch {
+        // Prune failure is not critical
       }
     }
 
@@ -76,7 +107,31 @@ export class WorktreeManager {
     }
 
     const forceFlag = force ? '--force' : '';
-    await $`cd ${this.projectPath} && git worktree remove ${worktreePath} ${forceFlag}`;
+    
+    try {
+      // Try the proper git way first
+      await $`cd ${this.projectPath} && git worktree remove ${worktreePath} ${forceFlag}`;
+    } catch (error) {
+      // If git fails (e.g., "Directory not empty"), fall back to manual deletion
+      console.log(`Git worktree remove failed, forcing directory deletion...`);
+      
+      // Prune stale worktree administrative files first
+      try {
+        await $`cd ${this.projectPath} && git worktree prune`;
+      } catch (pruneError) {
+        // Prune failure is not critical, continue
+      }
+      
+      // Force delete the directory
+      await $`rm -rf ${worktreePath}`;
+      
+      // Clean up git's worktree tracking
+      try {
+        await $`cd ${this.projectPath} && git worktree prune`;
+      } catch (pruneError) {
+        // Final prune failure is not critical
+      }
+    }
   }
 
   /**

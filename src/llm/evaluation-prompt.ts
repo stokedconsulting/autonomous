@@ -74,7 +74,10 @@ Analyze this issue and provide a structured evaluation in JSON format. Consider:
 {
   "classification": {
     "complexity": "medium",  // low, medium, high - Technical complexity assessment
-    "impact": "high"  // low, medium, high, critical - Business impact assessment
+    "impact": "high",  // low, medium, high, critical - Business impact assessment
+    "priority": "🟠 High",  // 🔴 Critical, 🟠 High, 🟡 Medium, 🟢 Low - Overall priority (derived from impact + complexity)
+    "area": "Frontend",  // Frontend, Backend, WebRTC, Infrastructure, Database, DevOps, Documentation
+    "workType": "✨ Feature"  // ✨ Feature, 🐛 Bug, 🔧 Enhancement, ♻️ Refactor, 📝 Docs, 🧹 Chore (default to Chore if unclear)
   },
   "scores": {
     "clarity": 8,  // 1-10: How clear and well-defined (acceptance criteria, details)

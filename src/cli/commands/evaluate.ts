@@ -24,7 +24,7 @@ export async function evaluateCommand(options: EvaluateOptions): Promise<void> {
     // Load configuration
     console.log('Loading configuration...');
     const configManager = new ConfigManager(cwd);
-    await configManager.load();
+    await configManager.initialize();
     const config = configManager.getConfig();
     console.log(chalk.green('✓ Configuration loaded'));
 
@@ -49,7 +49,7 @@ export async function evaluateCommand(options: EvaluateOptions): Promise<void> {
 
     // Initialize issue evaluator with project API if available
     const claudePath = config.llms?.claude?.cliPath || 'claude';
-    const issueEvaluator = new IssueEvaluator(cwd, claudePath, githubAPI, projectsAPI);
+    const issueEvaluator = new IssueEvaluator(claudePath, githubAPI, projectsAPI);
 
     // Fetch issues
     console.log('\nFetching issues from GitHub...');
@@ -112,7 +112,6 @@ export async function evaluateCommand(options: EvaluateOptions): Promise<void> {
     console.log(chalk.dim('This may take a few minutes depending on issue count and complexity.\n'));
 
     const result = await issueEvaluator.evaluateIssues(issues, {
-      forceReeval: options.force,
       verbose: options.verbose,
       postClarificationComments: config.github.postClarificationComments ?? true, // Default to true
     });
@@ -121,13 +120,10 @@ export async function evaluateCommand(options: EvaluateOptions): Promise<void> {
     console.log('\n' + chalk.blue('Evaluation Summary:'));
     console.log(`  ${chalk.green('✓')} Ready for assignment: ${result.evaluated.length}`);
     if (result.skipped.length > 0) {
-      console.log(`  ${chalk.yellow('⊘')} Needs more info: ${result.skipped.length}`);
+      console.log(`  ${chalk.yellow('⊘')} Needs More Info: ${result.skipped.length}`);
     }
     if (result.totalEvaluated > 0) {
       console.log(`  ${chalk.dim('ℹ')}  Total evaluated: ${result.totalEvaluated}`);
-    }
-    if (result.usedCache > 0) {
-      console.log(`  ${chalk.dim('⚡')} Used cache: ${result.usedCache}`);
     }
 
     if (options.verbose && result.evaluated.length > 0) {

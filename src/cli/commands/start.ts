@@ -13,11 +13,11 @@ import { basename } from 'path';
 interface StartOptions {
   dryRun?: boolean;
   verbose?: boolean;
+  epic?: string;          // Epic name to filter assignments
+  mergeMain?: boolean;    // Auto-merge to main (vs manual approval)
 }
 
 export async function startCommand(options: StartOptions): Promise<void> {
-  console.log(chalk.blue.bold('\n🚀 Starting Autonomous Mode\n'));
-
   try {
     const cwd = process.cwd();
     const projectName = basename(cwd);
@@ -56,6 +56,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
       let claudePath = 'claude';
       try {
         const { $ } = await import('zx');
+        $.verbose = false; // Suppress command echoing
         const shell = process.env.SHELL || '/bin/bash';
         const result = await $`${shell} -l -c "which claude"`;
         const detectedPath = result.stdout.trim();
@@ -75,7 +76,6 @@ export async function startCommand(options: StartOptions): Promise<void> {
       await configManager.enableLLM('claude', {
         cliPath: claudePath,
         cliArgs: ['--dangerously-skip-permissions'],
-        maxConcurrentIssues: 1,
         hooksEnabled: true,
       });
 
@@ -85,7 +85,7 @@ export async function startCommand(options: StartOptions): Promise<void> {
     } else {
       // Load existing configuration
       console.log('Loading configuration...');
-      await configManager.load();
+      await configManager.initialize();
     }
 
     // Validate configuration
@@ -104,6 +104,10 @@ export async function startCommand(options: StartOptions): Promise<void> {
     // Check for GitHub token
     const config = configManager.getConfig();
 
+    // Display project URL
+    const projectUrl = `https://github.com/${config.github.owner}/${config.github.repo}`;
+    console.log(chalk.blue.bold(`\n🚀 Starting Autonomous Mode: ${projectUrl}\n`));
+
     if (!hasGitHubToken(config.github.token)) {
       console.error(chalk.red('\n✗ GitHub token not found'));
       console.log(chalk.yellow('\nPlease authenticate with GitHub:'));
@@ -116,14 +120,26 @@ export async function startCommand(options: StartOptions): Promise<void> {
     }
 
     // Initialize assignment manager
-    console.log('Initializing assignment tracking...');
+    if (options.verbose) {
+      console.log('Initializing assignment tracking...');
+    }
     const assignmentManager = new AssignmentManager(cwd);
     await assignmentManager.initialize(projectName, cwd);
-    console.log(chalk.green('✓ Assignment tracking initialized'));
+    if (options.verbose) {
+      console.log(chalk.green('✓ Assignment tracking initialized'));
+    }
 
     // Initialize orchestrator
-    console.log('Starting orchestrator...');
-    const orchestrator = new Orchestrator(cwd, configManager, assignmentManager, options.verbose);
+    if (options.verbose) {
+      console.log('Starting orchestrator...');
+    }
+    const orchestrator = new Orchestrator(
+      cwd,
+      configManager,
+      assignmentManager,
+      options.verbose,
+      options.epic ? { epicName: options.epic, autoMergeToMain: options.mergeMain ?? false } : undefined
+    );
     await orchestrator.initialize();
 
     if (options.dryRun) {
@@ -158,8 +174,8 @@ export async function startCommand(options: StartOptions): Promise<void> {
 
     // Keep the process running
     await new Promise(() => {}); // Infinite promise
-  } catch (error: any) {
-    console.error(chalk.red('\n✗ Error starting autonomous mode:'), error.message);
+  } catch (error: unknown) {
+    console.error(chalk.red('\n✗ Error starting autonomous mode:'), error instanceof Error ? error.message : String(error));
     if (options.verbose) {
       console.error(error);
     }

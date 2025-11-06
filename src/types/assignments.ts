@@ -7,7 +7,14 @@
  * - Project fields: Priority, labels, sprint (read from project, never cached here)
  */
 
-export type AssignmentStatus = 'assigned' | 'in-progress' | 'llm-complete' | 'merged';
+export type AssignmentStatus =
+  | 'assigned'       // Issue assigned to LLM
+  | 'in-progress'    // LLM actively working
+  | 'in-review'      // PR created, awaiting review
+  | 'dev-complete'   // Dev work done, awaiting merge worker
+  | 'merge-review'   // Merge worker reviewing changes
+  | 'stage-ready'    // Merged to stage, ready for main
+  | 'merged';        // Merged to main, fully complete
 
 export type LLMProvider = 'claude' | 'gemini' | 'codex';
 
@@ -29,6 +36,7 @@ export interface Assignment {
   // Process State (LOCAL - autonomous-specific)
   llmProvider: LLMProvider;
   llmInstanceId: string;
+  processId?: number; // PID of the running LLM process
   worktreePath: string;
   branchName: string;
   workSessions: WorkSession[];
@@ -48,12 +56,28 @@ export interface Assignment {
   prUrl?: string;
   ciStatus?: 'pending' | 'success' | 'failure' | null;
 
+  // Merge & Review (LOCAL - merge worker state)
+  mergeStageCommit?: string; // Commit SHA on merge_stage branch
+  reviewResults?: {
+    startedAt: string;
+    completedAt?: string;
+    personaReviews: Array<{
+      persona: string;
+      passed: boolean;
+      feedback: string;
+      reviewedAt: string;
+    }>;
+    overallPassed: boolean;
+    failureReasons?: string[]; // If failed, why it was sent back to Todo
+  };
+
   // Metadata (LOCAL - process configuration)
   // NOTE: labels removed - read from project instead
   metadata?: {
     requiresTests: boolean;
     requiresCI: boolean;
     estimatedComplexity?: 'low' | 'medium' | 'high';
+    isPhaseMaster?: boolean; // True if this is a phase master coordinating sub-items
   };
 }
 
@@ -80,11 +104,13 @@ export interface CreateAssignmentInput {
 
 export interface UpdateAssignmentInput {
   status?: AssignmentStatus;
+  processId?: number; // PID of the running LLM process
   prNumber?: number;
   prUrl?: string;
   ciStatus?: 'pending' | 'success' | 'failure' | null;
   lastActivity?: string;
   llmInstanceId?: string; // Allow updating instance ID for slot-based naming
+  completedAt?: string;
 }
 
 // Make all WorkSession fields optional for input (startedAt will be set to current time if not provided)

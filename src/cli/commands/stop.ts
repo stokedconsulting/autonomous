@@ -14,10 +14,12 @@ export async function stopCommand(options: StopOptions): Promise<void> {
 
   try {
     const cwd = process.cwd();
+    const { basename } = await import('path');
+    const projectName = basename(cwd);
 
     // Load assignments to find running instances
     const assignmentManager = new AssignmentManager(cwd);
-    await assignmentManager.load();
+    await assignmentManager.initialize(projectName, cwd);
 
     const activeAssignments = assignmentManager.getAssignmentsByStatus('in-progress');
 
@@ -47,8 +49,8 @@ export async function stopCommand(options: StopOptions): Promise<void> {
     console.log(chalk.green('\n✓ All instances stopped'));
     console.log(chalk.blue('\nWork sessions have been saved.'));
     console.log('Resume with: auto start');
-  } catch (error: any) {
-    console.error(chalk.red('Error stopping autonomous mode:'), error.message);
+  } catch (error: unknown) {
+    console.error(chalk.red('Error stopping autonomous mode:'), error instanceof Error ? error.message : String(error));
     process.exit(1);
   }
 }

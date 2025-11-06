@@ -7,6 +7,8 @@ import { promises as fs } from 'fs';
 import { join } from 'path';
 import { LLMAdapter, LLMStatus, StartLLMOptions } from './adapter.js';
 import { LLMConfig } from '../types/index.js';
+import { ClaudePTYExecutor } from './claude-pty-executor.js';
+import { ClaudePrintExecutor } from './claude-print-executor.js';
 
 interface ClaudeInstance {
   instanceId: string;
@@ -14,6 +16,8 @@ interface ClaudeInstance {
   startedAt: string;
   assignmentId: string;
   worktreePath: string;
+  executor?: ClaudePTYExecutor | ClaudePrintExecutor;
+  mode?: 'pty' | 'print';
 }
 
 export class ClaudeAdapter implements LLMAdapter {
@@ -21,10 +25,19 @@ export class ClaudeAdapter implements LLMAdapter {
   private config: LLMConfig;
   private instances = new Map<string, ClaudeInstance>();
   private autonomousDataDir: string;
+  private verbose: boolean;
 
-  constructor(config: LLMConfig, autonomousDataDir: string) {
+  constructor(config: LLMConfig, autonomousDataDir: string, verbose: boolean = false) {
     this.config = config;
     this.autonomousDataDir = autonomousDataDir;
+    this.verbose = verbose;
+  }
+
+  /**
+   * Get subdirectory paths within .autonomous/
+   */
+  private getSubdirectory(type: 'sessions' | 'logs' | 'hooks' | 'prompts'): string {
+    return join(this.autonomousDataDir, type);
   }
 
   /**
@@ -37,85 +50,88 @@ export class ClaudeAdapter implements LLMAdapter {
     // Install hooks if enabled
     if (this.config.hooksEnabled) {
       await this.installHooks(workingDirectory, assignment.id);
+      await this.installSessionEndHook(workingDirectory);
     }
 
-    // Write the prompt to a file
-    const promptFile = join(this.autonomousDataDir, `prompt-${instanceId}.txt`);
-    await fs.writeFile(promptFile, prompt, 'utf-8');
+    // Ensure subdirectories exist
+    await fs.mkdir(this.getSubdirectory('prompts'), { recursive: true });
+    await fs.mkdir(this.getSubdirectory('logs'), { recursive: true });
 
-    // Start Claude in the worktree directory
-    // We'll use a background process approach
+    const logFile = join(this.getSubdirectory('logs'), `output-${instanceId}.log`);
     const cliPath = this.config.cliPath || 'claude';
-    const cliArgs = this.config.cliArgs || [];
-    const cliArgsString = cliArgs.length > 0 ? ' ' + cliArgs.join(' ') : '';
 
-    // Create a script to run Claude with the prompt
-    // Use user's shell to ensure PATH is set correctly
-    const userShell = process.env.SHELL || '/bin/bash';
-    const scriptPath = join(this.autonomousDataDir, `start-${instanceId}.sh`);
-    const logFile = join(this.autonomousDataDir, `output-${instanceId}.log`);
-    const fullCommand = `cat "${promptFile}" | ${cliPath}${cliArgsString} chat`;
-    const script = `#!${userShell}
-cd "${workingDirectory}"
-LOG_FILE="${logFile}"
-
-# Log session start
-echo "Launching Claude CLI: \$(date)" >> "\$LOG_FILE"
-echo "Command: ${fullCommand}" >> "\$LOG_FILE"
-echo "" >> "\$LOG_FILE"
-echo "=== Prompt ===" >> "\$LOG_FILE"
-cat "${promptFile}" >> "\$LOG_FILE"
-echo "" >> "\$LOG_FILE"
-echo "=== Claude Output ===" >> "\$LOG_FILE"
-echo "" >> "\$LOG_FILE"
-
-# Run Claude and capture exit code
-${fullCommand} 2>&1 | tee -a "\$LOG_FILE"
-EXIT_CODE=\${PIPESTATUS[0]}
-
-# Log exit status
-echo "" >> "\$LOG_FILE"
-echo "=== Session Ended ===" >> "\$LOG_FILE"
-echo "Exit code: \$EXIT_CODE" >> "\$LOG_FILE"
-echo "Ended: \$(date)" >> "\$LOG_FILE"
-
-exit \$EXIT_CODE
-`;
-
-    await fs.writeFile(scriptPath, script, 'utf-8');
-    await fs.chmod(scriptPath, 0o755);
-
-    // Create the log file immediately so monitoring can start
-    const logHeader = `=== Claude Autonomous Session Starting ===
-Instance ID: ${instanceId}
-Working Directory: ${workingDirectory}
-Started: ${new Date().toISOString()}
-========================================
-
-`;
+    // Create log header
+    const logHeader = `=== Claude Autonomous Session Starting ===\nInstance ID: ${instanceId}\nWorking Directory: ${workingDirectory}\nStarted: ${new Date().toISOString()}\n========================================\n\n`;
     await fs.writeFile(logFile, logHeader, 'utf-8');
 
-    // Spawn Claude as a background process
-    const { spawn } = await import('child_process');
-    const child = spawn(userShell, [scriptPath], {
-      detached: true,
-      stdio: 'ignore',
-      cwd: workingDirectory,
-      env: {
-        ...process.env,
-        CLAUDE_INSTANCE_ID: instanceId,
-      },
-    });
+    let pid: number | undefined;
+    let executor: ClaudePTYExecutor | ClaudePrintExecutor;
+    let mode: 'pty' | 'print';
 
-    // Unref so parent can exit without waiting
-    child.unref();
+    if (this.verbose) {
+      // PTY mode - real-time streaming with interactive terminal
+      mode = 'pty';
+      const ptyExecutor = new ClaudePTYExecutor();
+
+      ptyExecutor.on('exit', ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
+        if (signal) {
+          console.log(`\n⚠️  Claude session terminated by signal ${signal}`);
+        } else {
+          console.log(`\n✨ Claude session completed (exit code: ${exitCode})`);
+        }
+      });
+
+      // Start PTY execution (this will block until completion)
+      const startPromise = ptyExecutor.start({
+        promptText: prompt,
+        workingDirectory,
+        logFile,
+        instanceId,
+        claudePath: cliPath,
+        onData: (data: string) => {
+          // Real-time output to console
+          process.stdout.write(data);
+        },
+      });
+
+      pid = ptyExecutor.getPid();
+      executor = ptyExecutor;
+
+      // Don't await - let it run in background
+      startPromise.catch((error) => {
+        console.error(`\n❌ Claude PTY execution failed: ${error.message}`);
+      });
+    } else {
+      // Print mode - silent background execution
+      mode = 'print';
+      const printExecutor = new ClaudePrintExecutor();
+
+      // Start print execution (this will block until completion)
+      const startPromise = printExecutor.start({
+        promptText: prompt,
+        workingDirectory,
+        logFile,
+        instanceId,
+        claudePath: cliPath,
+      });
+
+      pid = printExecutor.getPid();
+      executor = printExecutor;
+
+      // Don't await - let it run in background
+      startPromise.catch((error) => {
+        console.error(`\n❌ Claude print execution failed: ${error.message}`);
+      });
+    }
 
     const instance: ClaudeInstance = {
       instanceId,
-      processId: child.pid || 0,
+      processId: pid || 0,
       startedAt: new Date().toISOString(),
       assignmentId: assignment.id,
       worktreePath: workingDirectory,
+      executor,
+      mode,
     };
 
     this.instances.set(instanceId, instance);
@@ -135,8 +151,11 @@ Started: ${new Date().toISOString()}
       throw new Error(`Instance ${instanceId} not found`);
     }
 
-    // Terminate the process if it's running
-    if (instance.processId) {
+    // Stop executor if present
+    if (instance.executor) {
+      instance.executor.stop();
+    } else if (instance.processId) {
+      // Fallback: terminate the process directly
       try {
         // Kill the process group (negative PID kills the group)
         process.kill(-instance.processId, 'SIGTERM');
@@ -148,13 +167,16 @@ Started: ${new Date().toISOString()}
 
     this.instances.delete(instanceId);
 
-    // Clean up instance files
-    const instanceFile = join(this.autonomousDataDir, `instance-${instanceId}.json`);
+    // Clean up instance files from sessions directory
+    const instanceFile = join(this.getSubdirectory('sessions'), `instance-${instanceId}.json`);
     try {
       await fs.unlink(instanceFile);
     } catch {
       // Ignore if file doesn't exist
     }
+
+    // Clean up session files
+    await this.cleanupSessionFiles(instanceId);
   }
 
   /**
@@ -172,7 +194,7 @@ Started: ${new Date().toISOString()}
     }
 
     // Check if session has ended via hook
-    const sessionFile = join(this.autonomousDataDir, `session-${instanceId}.json`);
+    const sessionFile = join(this.getSubdirectory('sessions'), `session-${instanceId}.json`);
     let sessionEnded = false;
     let lastActivity: string | undefined;
 
@@ -269,10 +291,37 @@ Started: ${new Date().toISOString()}
   }
 
   /**
+   * Install session-end hook for automatic PTY exit
+   */
+  private async installSessionEndHook(workingDir: string): Promise<void> {
+    const hookScript = `#!/usr/bin/env bash
+# Auto-exit hook for PTY-based Claude sessions
+
+# Check if we're running as child of autonomous tool
+if [[ -n "$AUTONOMOUS_PARENT_PID" ]]; then
+  # Wait 4 seconds for final output to flush
+  sleep 4
+
+  # Exit cleanly
+  echo ""
+  echo "🤖 Autonomous session complete - exiting..."
+  exit 0
+fi
+`;
+
+    const hooksDir = join(workingDir, '.claude', 'hooks');
+    const hookPath = join(hooksDir, 'session-end.sh');
+
+    await fs.mkdir(hooksDir, { recursive: true });
+    await fs.writeFile(hookPath, hookScript, 'utf-8');
+    await fs.chmod(hookPath, 0o755);
+  }
+
+  /**
    * Get the last work summary
    */
   async getLastSummary(instanceId: string): Promise<string | null> {
-    const sessionFile = join(this.autonomousDataDir, `session-${instanceId}.json`);
+    const sessionFile = join(this.getSubdirectory('sessions'), `session-${instanceId}.json`);
 
     try {
       const data = JSON.parse(await fs.readFile(sessionFile, 'utf-8'));
@@ -370,7 +419,27 @@ echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") - Tool: \${TOOL_NAME:-unknown}" >> "\$ACT
    * Save instance information
    */
   private async saveInstanceInfo(instanceId: string, instance: ClaudeInstance): Promise<void> {
-    const instanceFile = join(this.autonomousDataDir, `instance-${instanceId}.json`);
+    const instanceFile = join(this.getSubdirectory('sessions'), `instance-${instanceId}.json`);
     await fs.writeFile(instanceFile, JSON.stringify(instance, null, 2), 'utf-8');
+  }
+
+  /**
+   * Clean up session files after stop
+   */
+  private async cleanupSessionFiles(instanceId: string): Promise<void> {
+    const filesToCleanup = [
+      join(this.getSubdirectory('sessions'), `start-${instanceId}.sh`),
+      join(this.getSubdirectory('sessions'), `session-${instanceId}.json`),
+      join(this.getSubdirectory('prompts'), `prompt-${instanceId}.txt`),
+      join(this.getSubdirectory('logs'), `output-${instanceId}.log`),
+    ];
+
+    for (const file of filesToCleanup) {
+      try {
+        await fs.unlink(file);
+      } catch {
+        // Ignore if file doesn't exist
+      }
+    }
   }
 }

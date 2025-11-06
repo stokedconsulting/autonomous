@@ -56,14 +56,24 @@ export class GitHubAPI {
     labels?: string[];
     assignee?: string;
   }): Promise<GitHubIssue[]> {
-    const { data } = await this.octokit.issues.listForRepo({
+    // Build query parameters - only include labels if array has items
+    const queryParams: any = {
       owner: this.owner,
       repo: this.repo,
       state: filters?.state || 'open',
-      labels: filters?.labels?.join(','),
-      assignee: filters?.assignee,
       per_page: 100,
-    });
+    };
+
+    // Only add labels filter if there are actually labels to filter by
+    if (filters?.labels && filters.labels.length > 0) {
+      queryParams.labels = filters.labels.join(',');
+    }
+
+    if (filters?.assignee) {
+      queryParams.assignee = filters.assignee;
+    }
+
+    const { data } = await this.octokit.issues.listForRepo(queryParams);
 
     return data
       .filter((issue) => !issue.pull_request) // Filter out PRs
@@ -202,13 +212,14 @@ export class GitHubAPI {
   /**
    * Comment on an issue
    */
-  async createComment(issueNumber: number, body: string): Promise<void> {
-    await this.octokit.issues.createComment({
+  async createComment(issueNumber: number, body: string): Promise<string> {
+    const response = await this.octokit.issues.createComment({
       owner: this.owner,
       repo: this.repo,
       issue_number: issueNumber,
       body,
     });
+    return response.data.html_url;
   }
 
   /**
@@ -228,6 +239,17 @@ export class GitHubAPI {
         login: comment.user?.login || 'unknown',
       },
     }));
+  }
+
+  /**
+   * Delete a comment by ID
+   */
+  async deleteComment(commentId: number): Promise<void> {
+    await this.octokit.issues.deleteComment({
+      owner: this.owner,
+      repo: this.repo,
+      comment_id: commentId,
+    });
   }
 
   /**
@@ -280,6 +302,18 @@ export class GitHubAPI {
       repo: this.repo,
       issue_number: issueNumber,
       state: 'closed',
+    });
+  }
+
+  /**
+   * Assign users to an issue
+   */
+  async assignIssue(issueNumber: number, assignees: string[]): Promise<void> {
+    await this.octokit.issues.addAssignees({
+      owner: this.owner,
+      repo: this.repo,
+      issue_number: issueNumber,
+      assignees,
     });
   }
 

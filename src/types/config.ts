@@ -12,6 +12,7 @@ export interface LLMConfig {
   hooksEnabled?: boolean;
   apiKey?: string;
   model?: string;
+  user?: string; // GitHub username to assign issues to when this LLM takes work
   customConfig?: Record<string, any>;
 }
 
@@ -83,13 +84,14 @@ export interface ProjectConfig {
   fields: {
     status: {
       fieldName: string; // Usually "Status"
-      readyValues: string[]; // Status values considered "ready" (e.g., ["Ready", "Todo"])
+      readyValues: string[]; // Status values considered "ready" (e.g., ["Ready", "Todo", "Evaluated"])
+      evaluateValue?: string; // Status that triggers AI evaluation (e.g., "Evaluate") - optional
       inProgressValue: string; // Status for active work (e.g., "In Progress")
       reviewValue: string; // Status for PR review (e.g., "In Review")
       doneValue: string; // Status for completed work (e.g., "Done")
       blockedValue: string; // Status for blocked work (e.g., "Blocked")
       evaluatedValue: string; // Status for evaluated issues (e.g., "Evaluated")
-      needsMoreInfoValue: string; // Status for issues needing clarification (e.g., "Needs more info")
+      needsMoreInfoValue: string; // Status for issues needing clarification (e.g., "Needs More Info")
     };
     priority?: {
       fieldName: string; // Usually "Priority"
@@ -112,6 +114,22 @@ export interface ProjectConfig {
       fieldName: string; // Usually "Assigned Instance" or "LLM Worker"
       // Values are auto-generated as {provider}-{slotNumber}, e.g., "claude-1", "gemini-2"
     };
+    issueType?: {
+      fieldName: string; // Usually "Issue Type" or "Work Type"
+      labelMappings?: Record<string, string>; // Maps issue type values to GitHub labels (e.g., { "Bug": "bug", "Feature": "enhancement" })
+    };
+    effort?: {
+      fieldName: string; // Usually "Effort" or "Estimated Effort"
+      // Auto-populated from AI's estimatedEffort field (e.g., "2-4 hours", "1-2 days")
+    };
+    complexity?: {
+      fieldName: string; // Usually "Complexity"
+      // Auto-populated from complexity:* labels (e.g., complexity:high -> High)
+    };
+    impact?: {
+      fieldName: string; // Usually "Impact"
+      // Auto-populated from impact:* labels (e.g., impact:high -> High)
+    };
   };
 
   // Hybrid prioritization weights (Phase 1+)
@@ -132,6 +150,21 @@ export interface ProjectConfig {
   };
 }
 
+export interface MergeWorkerConfig {
+  enabled: boolean;
+  claudePath?: string;
+  mainBranch?: string;
+  stageBranch?: string;
+  requireAllPersonasPass?: boolean;
+  autoResolveConflicts?: boolean;
+  personas?: string[]; // Custom persona names to use
+}
+
+export interface ReviewWorkerConfig {
+  maxConcurrent?: number; // Max concurrent reviews (default: 3)
+  claudePath?: string;    // Path to Claude CLI executable (default: 'claude')
+}
+
 export interface AutonomousConfig {
   version: string;
   llms: Record<LLMProvider, LLMConfig>;
@@ -141,6 +174,8 @@ export interface AutonomousConfig {
   project?: ProjectConfig; // Phase 0+ GitHub Projects v2 integration
   push?: PushConfig;
   notifications?: NotificationConfig;
+  mergeWorker?: MergeWorkerConfig; // Automated merge and review worker
+  reviewWorker?: ReviewWorkerConfig; // Manual review worker configuration
   logging?: {
     level: 'debug' | 'info' | 'warn' | 'error';
     file?: string;

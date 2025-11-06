@@ -19,6 +19,8 @@ export interface ProjectItemMetadata {
   sprint: SprintFieldValue | null;
   blockedBy: string | null;       // Text field with issue numbers
   effortEstimate: number | null;  // Hours estimate
+  epic: string | null;            // Epic name or issue number this belongs to
+  phase: string | null;           // Phase identifier e.g., "Phase 1", "Phase 2"
 }
 
 export interface SprintFieldValue {
@@ -45,7 +47,7 @@ export interface PrioritizationContext {
   issueNumber: number;
   issueTitle: string;
 
-  // AI evaluation (from cache)
+  // AI evaluation (on-demand)
   aiPriorityScore: number;  // 1-10
   complexity: 'low' | 'medium' | 'high';
   impact: 'low' | 'medium' | 'high' | 'critical';
@@ -133,4 +135,21 @@ export interface DependencyScore {
   isBlocked: boolean;      // Has unresolved dependencies
   isLeaf: boolean;         // Doesn't block anything
   depthFromRoot: number;   // Steps from a root node
+}
+
+/**
+ * Epic orchestration types for phased development
+ */
+export interface EpicPhase {
+  phaseName: string;              // e.g., "Phase 1", "Phase 2"
+  masterItem: ProjectItemWithMetadata | null;  // Master/epic item for this phase
+  workItems: ProjectItemWithMetadata[];        // Regular work items in this phase
+  isComplete: boolean;            // All items done and merged to main
+  allItemsMerged: boolean;        // All PRs merged to main
+}
+
+export interface EpicOrchestratorConfig {
+  epicName: string;               // Epic to filter by
+  currentPhase: string | null;    // Currently active phase
+  autoMergeToMain: boolean;       // Auto-merge stage to main (vs manual)
 }

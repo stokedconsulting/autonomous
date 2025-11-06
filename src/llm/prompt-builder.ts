@@ -20,10 +20,52 @@ export interface PromptContext {
 
 export class PromptBuilder {
   /**
+   * Detect if an issue is a phase master based on title
+   * Phase master detection:
+   * - Title contains "MASTER" keyword (required)
+   * - Title contains "Phase N" where N is an integer (NOT decimal like Phase 7.2)
+   */
+  static isPhaseMaster(issueTitle: string): boolean {
+    // MUST have MASTER keyword
+    const hasMaster = /MASTER/i.test(issueTitle);
+    if (!hasMaster) {
+      return false;
+    }
+
+    // Extract phase number - must be integer, not decimal
+    const phaseMatch = issueTitle.match(/Phase\s+(\d+)(?:\.\d+)?/i);
+    if (!phaseMatch) {
+      return false;
+    }
+
+    // If there's a decimal (e.g., "Phase 7.2"), it's a work item, not a master
+    const hasDecimal = /Phase\s+\d+\.\d+/i.test(issueTitle);
+    return !hasDecimal;
+  }
+
+  /**
+   * Detect if an issue is a phase work item (Phase N.x format)
+   */
+  static isPhaseWorkItem(issueTitle: string): boolean {
+    // Must match "Phase N.x" pattern (decimal indicates work item)
+    return /Phase\s+\d+\.\d+/i.test(issueTitle);
+  }
+
+  /**
    * Generate initial prompt for starting work on an issue
    */
   static buildInitialPrompt(context: PromptContext): string {
     const { assignment, worktreePath } = context;
+
+    // Use phase master prompt if this is a phase master
+    if (assignment.metadata?.isPhaseMaster) {
+      return this.buildPhaseMasterPrompt(context);
+    }
+
+    // Use phase work item prompt if this is a work item (no PR required)
+    if (this.isPhaseWorkItem(assignment.issueTitle)) {
+      return this.buildPhaseWorkItemPrompt(context);
+    }
 
     return `You are working autonomously on GitHub issue #${assignment.issueNumber}: ${assignment.issueTitle}
 
@@ -51,6 +93,83 @@ Begin by:
 4. Starting with the most critical changes
 
 Start working on this issue now.`;
+  }
+
+  /**
+   * Generate phase master coordination prompt
+   * Phase masters coordinate completed sub-items rather than implementing
+   */
+  static buildPhaseMasterPrompt(context: PromptContext): string {
+    const { assignment, worktreePath } = context;
+
+    return `You are coordinating a phase master issue #${assignment.issueNumber}: ${assignment.issueTitle}
+
+Issue Details:
+${assignment.issueBody || 'No description provided'}
+
+IMPORTANT: This is a PHASE MASTER issue, not a regular implementation task.
+
+Your responsibilities:
+1. Create a feature branch (already done: ${assignment.branchName})
+2. Merge each worktree for the completed sub-items into your feature branch
+   - Carefully resolve any merge conflicts that may arise
+   - Ensure all sub-item changes are properly integrated
+3. Run smoke tests as well as any new tests that were added in the phase
+   - Ensure all tests pass
+   - If tests fail, correct the code until they do while maintaining intended functionality
+4. Run "auto push --pr" to create the pull request
+5. Report completion summary
+   - Summarize what was merged and integrated
+   - Confirm all tests are passing
+   - Note the PR URL
+   - The system will automatically update the status after PR creation
+
+Your working directory is: ${worktreePath}
+
+Phase Master Workflow:
+- Review the issue description for the list of completed sub-items
+- Merge each sub-item's branch into this phase master branch
+- Resolve conflicts carefully - understand what each sub-item was trying to accomplish
+- Run comprehensive tests to ensure integration is correct
+- Create PR only after all tests pass
+
+Start by checking git status and identifying which sub-item branches need to be merged.`;
+  }
+
+  /**
+   * Generate phase work item prompt (no PR creation, just implementation)
+   */
+  static buildPhaseWorkItemPrompt(context: PromptContext): string {
+    const { assignment, worktreePath } = context;
+
+    return `You are working autonomously on GitHub issue #${assignment.issueNumber}: ${assignment.issueTitle}
+
+Issue Details:
+${assignment.issueBody || 'No description provided'}
+
+IMPORTANT: This is a PHASE WORK ITEM. Your changes will be merged into the phase master branch.
+
+Your responsibilities:
+1. Create a feature branch (already done: ${assignment.branchName})
+2. Implement the requested functionality according to specifications
+3. ${assignment.metadata?.requiresTests ? 'Write comprehensive tests for your implementation' : 'Ensure code quality'}
+4. ${assignment.metadata?.requiresTests ? 'Ensure all tests pass' : 'Test your implementation manually'}
+5. Push your changes to your feature branch
+6. Report completion summary
+   - DO NOT create a pull request - the phase master will merge your branch
+   - Summarize what was implemented
+   - Confirm tests are passing
+   - The system will automatically update your status
+
+Your working directory is: ${worktreePath}
+
+Work Item Workflow:
+- Implement your assigned functionality
+- Write tests to ensure quality
+- Push changes to ${assignment.branchName}
+- The phase master will later merge your branch along with other work items
+
+Start by analyzing the requirements and implementing your specific task.`;
   }
 
   /**

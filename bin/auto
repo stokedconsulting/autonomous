@@ -1,0 +1,25 @@
+#!/bin/bash
+
+# Auto - Wrapper for autonomous persona command
+# Usage: auto persona <persona-name> <prompt>
+#        auto persona --list
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AUTONOMOUS_CLI="$SCRIPT_DIR/../dist/cli/index.js"
+
+# Check if node is available
+if ! command -v node &> /dev/null; then
+    echo "Error: node is not installed or not in PATH"
+    exit 1
+fi
+
+# Check if the CLI exists
+if [ ! -f "$AUTONOMOUS_CLI" ]; then
+    echo "Error: autonomous CLI not found at $AUTONOMOUS_CLI"
+    echo "Please run 'pnpm run build' first"
+    exit 1
+fi
+
+# Run the autonomous persona command
+exec node "$AUTONOMOUS_CLI" persona "$@"

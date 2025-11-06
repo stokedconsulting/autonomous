@@ -172,7 +172,12 @@ export class InstanceManager {
       abandonedSlots: number;
     }
   > {
-    const stats: Record<string, any> = {};
+    const stats = {} as Record<LLMProvider, {
+      maxSlots: number;
+      usedSlots: number;
+      availableSlots: number;
+      abandonedSlots: number;
+    }>;
 
     for (const provider of ['claude', 'gemini', 'codex'] as LLMProvider[]) {
       const slots = this.getProviderSlots(provider);

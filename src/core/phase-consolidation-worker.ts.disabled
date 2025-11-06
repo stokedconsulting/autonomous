@@ -1,0 +1,337 @@
+/**
+ * Phase Consolidation Worker - Consolidates all phase work into phase master branch
+ *
+ * Workflow:
+ * 1. Create worktree for phase master item
+ * 2. Merge all phase work item branches sequentially
+ * 3. Resolve conflicts with Claude if needed
+ * 4. Run all phase tests
+ * 5. If tests pass → mark as dev-complete → trigger review worker
+ * 6. Review worker moves to stage
+ * 7. If --merge-main flag: stage → main → mark all phase items Done
+ * 8. If no --merge-main: mark Done when reaching stage
+ */
+
+import { AssignmentManager } from './assignment-manager.js';
+import { WorktreeManager } from '../git/worktree-manager.js';
+import { ConflictResolver } from '../git/conflict-resolver.js';
+import { EpicOrchestrator } from './epic-orchestrator.js';
+import { ProjectItemWithMetadata } from '../types/project.js';
+import { Assignment } from '../types/assignments.js';
+import chalk from 'chalk';
+import { $ } from 'zx';
+
+export interface PhaseConsolidationConfig {
+  enabled: boolean;
+  autoMergeToMain?: boolean; // Same as -mm flag for epic mode
+  claudePath?: string;
+  mainBranch?: string;
+  stageBranch?: string;
+  testCommand?: string;
+}
+
+export class PhaseConsolidationWorker {
+  private assignmentManager: AssignmentManager;
+  private conflictResolver: ConflictResolver;
+  private config: PhaseConsolidationConfig;
+  private verbose: boolean;
+
+  constructor(
+    assignmentManager: AssignmentManager,
+    worktreeManager: WorktreeManager, // Keep for future use
+    epicOrchestrator: EpicOrchestrator, // Keep for future use
+    projectPath: string,
+    config: PhaseConsolidationConfig,
+    verbose = false
+  ) {
+    this.assignmentManager = assignmentManager;
+    this.config = config;
+    this.verbose = verbose;
+
+    // Initialize conflict resolver
+    this.conflictResolver = new ConflictResolver(
+      projectPath,
+      config.claudePath || 'claude'
+    );
+  }
+
+  /**
+   * Main consolidation workflow
+   */
+  async consolidatePhase(phaseMasterAssignment: Assignment): Promise<void> {
+    const { issueNumber, issueTitle, branchName, worktreePath } = phaseMasterAssignment;
+
+    this.logEvent('🎯', `Starting phase consolidation for #${issueNumber}`, issueTitle || '');
+
+    try {
+      // Step 1: Get all phase work items
+      const phaseItems = await this.getPhaseWorkItems(issueNumber);
+
+      if (phaseItems.length === 0) {
+        this.logEvent('⚠️', 'No phase work items found', '');
+        await this.assignmentManager.updateStatusWithSync(phaseMasterAssignment.id, 'assigned');
+        return;
+      }
+
+      this.logEvent('📋', `Found ${phaseItems.length} phase work items to merge`, '');
+
+      // Step 2: Merge all phase work branches into phase master worktree
+      const mergeSuccess = await this.mergePhaseWorkBranches(
+        worktreePath,
+        branchName,
+        phaseItems
+      );
+
+      if (!mergeSuccess) {
+        this.logEvent('❌', 'Phase merge failed', 'Marking as needs-more-info');
+        await this.assignmentManager.updateStatusWithSync(phaseMasterAssignment.id, 'needs-more-info');
+        return;
+      }
+
+      // Step 3: Run all phase tests
+      const testsPass = await this.runPhaseTests(worktreePath);
+
+      if (!testsPass) {
+        this.logEvent('❌', 'Phase tests failed', 'Marking as needs-more-info');
+        await this.assignmentManager.updateStatusWithSync(phaseMasterAssignment.id, 'needs-more-info');
+        return;
+      }
+
+      // Step 4: Mark as dev-complete
+      this.logEvent('✅', 'Phase consolidation complete', 'Tests passed');
+      await this.assignmentManager.updateStatusWithSync(phaseMasterAssignment.id, 'dev-complete');
+
+      // Step 5: Push consolidated branch
+      await this.pushConsolidatedBranch(worktreePath, branchName, issueNumber);
+
+      this.logEvent('✅', `Phase master #${issueNumber} ready for review`, '');
+
+      // Note: Review worker will be triggered by orchestrator detecting dev-complete status
+      // Review worker will handle stage merge
+      // If autoMergeToMain is enabled, merge worker will handle stage→main
+      // This worker's job is done after consolidation + tests pass
+
+    } catch (error) {
+      console.error(chalk.red(`\n❌ Phase consolidation error: ${error}`));
+      await this.assignmentManager.updateStatusWithSync(phaseMasterAssignment.id, 'needs-more-info');
+      throw error;
+    }
+  }
+
+  /**
+   * Get all work items in the same phase as the phase master
+   */
+  private async getPhaseWorkItems(phaseMasterNumber: number): Promise<ProjectItemWithMetadata[]> {
+    // Get phase master metadata to find its phase
+    const assignments = this.assignmentManager.getAssignments();
+    const phaseMasterAssignment = assignments.find(a => a.issueNumber === phaseMasterNumber);
+
+    if (!phaseMasterAssignment) {
+      throw new Error(`Phase master assignment not found for issue #${phaseMasterNumber}`);
+    }
+
+    // Get all epic items and group by phase
+    // This requires access to all project items, which should come from orchestrator
+    // For now, get phase from assignment metadata or issue title
+
+    const phaseMatch = phaseMasterAssignment.issueTitle?.match(/\b[Pp]hase\s+(\d+)\b/);
+    if (!phaseMatch) {
+      throw new Error(`Could not determine phase from issue #${phaseMasterNumber} title`);
+    }
+
+    const phaseNumber = phaseMatch[1];
+
+    // Get all assignments in same phase that are dev-complete or beyond
+    const phaseWorkItems = assignments.filter(a => {
+      // Must be in same phase
+      const itemPhaseMatch = a.issueTitle?.match(/\b[Pp]hase\s+(\d+)\b/);
+      if (!itemPhaseMatch || itemPhaseMatch[1] !== phaseNumber) {
+        return false;
+      }
+
+      // Must not be the phase master itself
+      if (a.issueNumber === phaseMasterNumber) {
+        return false;
+      }
+
+      // Must be dev-complete or beyond
+      const status = a.status;
+      return status === 'dev-complete' ||
+             status === 'merge-review' ||
+             status === 'stage-ready' ||
+             status === 'merged';
+    });
+
+    // Convert to ProjectItemWithMetadata format (minimal)
+    return phaseWorkItems.map(a => ({
+      issueNumber: a.issueNumber,
+      issueTitle: a.issueTitle || '',
+      metadata: {
+        status: a.status,
+      },
+      branchName: a.branchName,
+    } as ProjectItemWithMetadata));
+  }
+
+  /**
+   * Merge all phase work branches into phase master worktree
+   */
+  private async mergePhaseWorkBranches(
+    worktreePath: string,
+    phaseMasterBranch: string,
+    phaseItems: ProjectItemWithMetadata[]
+  ): Promise<boolean> {
+    $.cwd = worktreePath;
+    $.verbose = this.verbose;
+
+    try {
+      // Ensure we're on the phase master branch
+      await $`git checkout ${phaseMasterBranch}`;
+
+      // Fetch all remote branches
+      await $`git fetch origin`;
+
+      // Merge each phase work branch sequentially
+      for (const item of phaseItems) {
+        this.logEvent('🔀', `Merging branch: ${item.branchName}`, `#${item.issueNumber}: ${item.issueTitle}`);
+
+        try {
+          // Attempt merge
+          await $`git merge --no-ff origin/${item.branchName} -m "Merge ${item.branchName} into phase consolidation"`;
+
+          this.logEvent('✅', `Merged: ${item.branchName}`, '');
+        } catch (error) {
+          // Merge conflict - resolve with Claude
+          this.logEvent('⚠️', `Merge conflict detected`, `Resolving with Claude...`);
+
+          const conflictFiles = await this.getConflictFiles();
+
+          if (conflictFiles.length === 0) {
+            throw new Error(`Merge failed but no conflict files detected: ${error}`);
+          }
+
+          // Resolve conflicts
+          const resolution = await this.conflictResolver.resolveConflicts(conflictFiles, {
+            branchName: phaseMasterBranch,
+            issueNumber: item.issueNumber,
+            issueTitle: item.issueTitle,
+          });
+
+          if (!resolution.success) {
+            this.logEvent('❌', `Failed to resolve conflicts for ${item.branchName}`, '');
+            return false;
+          }
+
+          // Commit resolved conflicts
+          await $`git add .`;
+          await $`git commit -m "Resolve conflicts from ${item.branchName}"`;
+
+          this.logEvent('✅', `Resolved conflicts and merged: ${item.branchName}`, '');
+        }
+      }
+
+      return true;
+    } catch (error) {
+      console.error(chalk.red(`\n❌ Branch merge error: ${error}`));
+      return false;
+    } finally {
+      $.verbose = false;
+    }
+  }
+
+  /**
+   * Get list of conflicted files
+   */
+  private async getConflictFiles(): Promise<string[]> {
+    const result = await $`git diff --name-only --diff-filter=U`;
+    return result.stdout
+      .trim()
+      .split('\n')
+      .filter(line => line.length > 0);
+  }
+
+  /**
+   * Run all phase tests
+   */
+  private async runPhaseTests(worktreePath: string): Promise<boolean> {
+    if (!this.config.testCommand) {
+      this.logEvent('⚠️', 'No test command configured', 'Skipping tests');
+      return true;
+    }
+
+    $.cwd = worktreePath;
+    $.verbose = this.verbose;
+
+    try {
+      this.logEvent('🧪', 'Running phase tests...', '');
+
+      await $`${this.config.testCommand}`;
+
+      this.logEvent('✅', 'All tests passed', '');
+      return true;
+    } catch (error) {
+      this.logEvent('❌', 'Tests failed', String(error));
+      return false;
+    } finally {
+      $.verbose = false;
+    }
+  }
+
+  /**
+   * Push consolidated branch to remote
+   */
+  private async pushConsolidatedBranch(
+    worktreePath: string,
+    branchName: string,
+    issueNumber: number
+  ): Promise<void> {
+    $.cwd = worktreePath;
+    $.verbose = this.verbose;
+
+    try {
+      await $`git push origin ${branchName}`;
+      this.logEvent('📤', `Pushed consolidated branch: ${branchName}`, '');
+    } catch (error) {
+      this.logEvent('⚠️', `Failed to push branch: ${error}`, '');
+      throw error;
+    } finally {
+      $.verbose = false;
+    }
+  }
+
+  /**
+   * Mark all phase items as Done (called after successful stage or main merge)
+   */
+  async markPhaseItemsAsDone(phaseMasterNumber: number): Promise<void> {
+    const phaseItems = await this.getPhaseWorkItems(phaseMasterNumber);
+
+    this.logEvent('✅', `Marking ${phaseItems.length + 1} phase items as Done`, '');
+
+    // Mark all phase work items as Done
+    for (const item of phaseItems) {
+      const assignment = this.assignmentManager.getAssignmentByIssueNumber(item.issueNumber);
+      if (assignment) {
+        await this.assignmentManager.updateStatusWithSync(assignment.id, 'done');
+      }
+    }
+
+    // Mark phase master as Done
+    const phaseMasterAssignment = this.assignmentManager.getAssignmentByIssueNumber(phaseMasterNumber);
+    if (phaseMasterAssignment) {
+      await this.assignmentManager.updateStatusWithSync(phaseMasterAssignment.id, 'done');
+    }
+
+    this.logEvent('✅', 'Phase complete - all items marked as Done', '');
+  }
+
+  /**
+   * Log event with consistent formatting
+   */
+  private logEvent(icon: string, message: string, detail: string): void {
+    const timestamp = new Date().toLocaleTimeString();
+    console.log(`${chalk.gray(`[${timestamp}]`)} ${icon} ${chalk.bold(message)}`);
+    if (detail) {
+      console.log(chalk.gray(`  ${detail}`));
+    }
+  }
+}

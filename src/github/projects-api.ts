@@ -48,10 +48,13 @@ export interface ProjectItemsQueryResult {
  * Maps autonomous AssignmentStatus to project Status field values
  */
 const STATUS_MAPPING: Record<AssignmentStatus, string> = {
-  'assigned': 'Todo',             // Just assigned, ready to work
+  'assigned': 'Todo',              // Just assigned, ready to work
   'in-progress': 'In Progress',    // LLM is working
-  'llm-complete': 'In review',     // LLM done, PR created, awaiting review
-  'merged': 'Done',                // PR merged
+  'in-review': 'In Review',        // PR created, awaiting review
+  'dev-complete': 'Dev Complete',  // Dev work done, awaiting merge worker
+  'merge-review': 'Merge Review',  // Merge worker reviewing changes
+  'stage-ready': 'Stage Ready',    // Merged to stage, ready for main
+  'merged': 'Done',                // Merged to main
 };
 
 /**
@@ -63,8 +66,11 @@ const STATUS_MAPPING: Record<AssignmentStatus, string> = {
  */
 const REVERSE_STATUS_MAPPING: Record<string, AssignmentStatus> = {
   'In Progress': 'in-progress',    // Actively being worked on by LLM
-  'In review': 'llm-complete',     // LLM done, PR created, awaiting review
-  'Done': 'merged',                // PR merged, completed
+  'In Review': 'in-review',        // PR created, awaiting review
+  'Dev Complete': 'dev-complete',  // Dev work done, awaiting merge worker
+  'Merge Review': 'merge-review',  // Merge worker reviewing changes
+  'Stage Ready': 'stage-ready',    // Merged to stage, ready for main
+  'Done': 'merged',                // Merged to main, completed
 };
 
 export class GitHubProjectsAPI implements ProjectAPI {
@@ -249,7 +255,7 @@ export class GitHubProjectsAPI implements ProjectAPI {
    *
    * Returns null for unmapped statuses:
    * - Pre-assignment: Todo, Ready, Backlog, Evaluated (assignable but not assigned yet)
-   * - Blocked: Needs more info
+   * - Blocked: Needs More Info
    */
   async getItemStatus(projectItemId: string): Promise<AssignmentStatus | null> {
     const statusFieldId = await this.getFieldId(this.config.fields.status.fieldName);
@@ -337,7 +343,7 @@ export class GitHubProjectsAPI implements ProjectAPI {
 
   /**
    * Update the Status field to a specific value (by name)
-   * This is used for evaluation statuses like "Evaluated" or "Needs more info"
+   * This is used for evaluation statuses like "Evaluated" or "Needs More Info"
    */
   async updateItemStatusByValue(projectItemId: string, statusValue: string): Promise<void> {
     const statusFieldId = await this.getFieldId(this.config.fields.status.fieldName);
@@ -427,6 +433,7 @@ export class GitHubProjectsAPI implements ProjectAPI {
     status?: string[];
     limit?: number;
     cursor?: string;
+    includeNoStatus?: boolean; // If true, include items with no status set
   }): Promise<ProjectItemsQueryResult> {
     const limit = filters?.limit || 100;
     const afterClause = filters?.cursor ? `, after: "${filters.cursor}"` : '';
@@ -547,9 +554,17 @@ export class GitHubProjectsAPI implements ProjectAPI {
     let filteredItems = items;
     if (filters?.status && filters.status.length > 0) {
       const statusFieldName = this.config.fields.status.fieldName;
-      filteredItems = items.filter((item) =>
-        filters.status!.includes(item.fieldValues[statusFieldName])
-      );
+      filteredItems = items.filter((item) => {
+        const statusValue = item.fieldValues[statusFieldName];
+
+        // If includeNoStatus is true, include items with no status OR matching status
+        if (filters.includeNoStatus) {
+          return !statusValue || filters.status!.includes(statusValue);
+        }
+
+        // Otherwise, include ONLY if status matches one of the desired statuses
+        return statusValue && filters.status!.includes(statusValue);
+      });
     }
 
     return {
@@ -763,6 +778,40 @@ export class GitHubProjectsAPI implements ProjectAPI {
   }
 
   /**
+   * Update a number field on a project item
+   */
+  async updateItemNumberField(
+    projectItemId: string,
+    fieldName: string,
+    value: number | null
+  ): Promise<void> {
+    const fieldId = await this.getFieldId(fieldName);
+
+    if (!fieldId) {
+      throw new Error(`Field "${fieldName}" not found in project`);
+    }
+
+    const mutation = `
+      mutation {
+        updateProjectV2ItemFieldValue(input: {
+          projectId: "${this.projectId}"
+          itemId: "${projectItemId}"
+          fieldId: "${fieldId}"
+          value: {
+            number: ${value !== null ? value : 'null'}
+          }
+        }) {
+          projectV2Item {
+            id
+          }
+        }
+      }
+    `;
+
+    await this.graphql(mutation);
+  }
+
+  /**
    * Get a single-select field value
    */
   async getItemSelectFieldValue(
@@ -844,6 +893,9 @@ export class GitHubProjectsAPI implements ProjectAPI {
    */
   async ensureAutonomousView(claudeConfig?: { cliPath: string; cliArgs?: string[] }): Promise<void> {
     const viewName = 'Autonomous';
+
+    // Check if Complexity and Impact fields exist
+    await this.ensureComplexityImpactFields();
 
     // Check if view exists
     const query = `
@@ -978,6 +1030,8 @@ export class GitHubProjectsAPI implements ProjectAPI {
         'Title',
         'Assignees',
         'Labels',
+        this.config.fields.complexity?.fieldName || 'Complexity',
+        this.config.fields.impact?.fieldName || 'Impact',
         this.config.fields.status.fieldName,
         this.config.fields.priority?.fieldName,
         this.config.fields.size?.fieldName,
@@ -1018,6 +1072,286 @@ export class GitHubProjectsAPI implements ProjectAPI {
     } finally {
       await browser.close();
     }
+  }
+
+  /**
+   * Ensure Complexity, Impact, and Assigned Instance fields exist in the project
+   */
+  async ensureComplexityImpactFields(): Promise<void> {
+    const fields = await this.getFields();
+
+    const complexityFieldName = this.config.fields.complexity?.fieldName || 'Complexity';
+    const impactFieldName = this.config.fields.impact?.fieldName || 'Impact';
+    const assignedInstanceFieldName = this.config.fields.assignedInstance?.fieldName || 'Assigned Instance';
+
+    const complexityField = fields.find(f => f.name === complexityFieldName);
+    const impactField = fields.find(f => f.name === impactFieldName);
+    const assignedInstanceField = fields.find(f => f.name === assignedInstanceFieldName);
+
+    if (!complexityField) {
+      console.log(`⚠️  ${complexityFieldName} field not found in project.`);
+      console.log(`   Please create a "${complexityFieldName}" single-select field with options: Low, Medium, High`);
+    }
+
+    if (!impactField) {
+      console.log(`⚠️  ${impactFieldName} field not found in project.`);
+      console.log(`   Please create an "${impactFieldName}" single-select field with options: Low, Medium, High`);
+    }
+
+    if (!assignedInstanceField) {
+      console.log(`⚠️  ${assignedInstanceFieldName} field not found in project.`);
+      console.log(`   Please create a "${assignedInstanceFieldName}" TEXT field to track which LLM instance is working on each issue.`);
+      console.log(`   This is CRITICAL for preventing duplicate work!`);
+    }
+  }
+
+  /**
+   * Parse complexity and impact from issue labels
+   * Labels like "complexity:high" become { complexity: "High" }
+   */
+  private parseComplexityImpactLabels(labels: Array<{ name: string }>): {
+    complexity?: string;
+    impact?: string;
+    typeLabels: string[];
+  } {
+    const result: { complexity?: string; impact?: string; typeLabels: string[] } = { typeLabels: [] };
+
+    for (const label of labels) {
+      const name = label.name.toLowerCase();
+
+      if (name.startsWith('complexity:')) {
+        const value = name.split(':')[1];
+        // Capitalize first letter
+        result.complexity = value.charAt(0).toUpperCase() + value.slice(1);
+      } else if (name.startsWith('impact:')) {
+        const value = name.split(':')[1];
+        // Capitalize first letter
+        result.impact = value.charAt(0).toUpperCase() + value.slice(1);
+      } else {
+        // Keep other labels (enhancement, bug, documentation, etc.)
+        result.typeLabels.push(label.name);
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * Sync issue labels to Complexity and Impact project fields
+   * Parses complexity:* and impact:* labels and sets the corresponding project fields
+   */
+  async syncIssueLabelsToFields(
+    issueNumber: number,
+    labels: Array<{ name: string }>
+  ): Promise<void> {
+    const projectItemId = await this.getProjectItemIdByIssue(issueNumber);
+    if (!projectItemId) {
+      return; // Issue not in project
+    }
+
+    const { complexity, impact } = this.parseComplexityImpactLabels(labels);
+
+    const complexityFieldName = this.config.fields.complexity?.fieldName || 'Complexity';
+    const impactFieldName = this.config.fields.impact?.fieldName || 'Impact';
+
+    // Update Complexity field if value found
+    if (complexity) {
+      try {
+        await this.updateItemFieldValue(projectItemId, complexityFieldName, complexity);
+      } catch (error) {
+        // Field might not exist, silently skip
+        console.warn(`Could not update ${complexityFieldName} field for issue #${issueNumber}`);
+      }
+    }
+
+    // Update Impact field if value found
+    if (impact) {
+      try {
+        await this.updateItemFieldValue(projectItemId, impactFieldName, impact);
+      } catch (error) {
+        // Field might not exist, silently skip
+        console.warn(`Could not update ${impactFieldName} field for issue #${issueNumber}`);
+      }
+    }
+  }
+
+  /**
+   * Sync Work Type field from issue labels
+   * Maps labels like "bug", "enhancement", "documentation" to Work Type field
+   */
+  async syncWorkTypeFromLabels(
+    issueNumber: number,
+    labels: Array<{ name: string }>
+  ): Promise<void> {
+    const projectItemId = await this.getProjectItemIdByIssue(issueNumber);
+    if (!projectItemId) {
+      return;
+    }
+
+    const workTypeFieldName = this.config.fields.issueType?.fieldName || 'Work Type';
+
+    // Map common labels to work types
+    const labelToWorkType: Record<string, string> = {
+      'bug': 'Bug',
+      'enhancement': 'Feature',
+      'feature': 'Feature',
+      'documentation': 'Documentation',
+      'docs': 'Documentation',
+      'refactor': 'Refactor',
+      'refactoring': 'Refactor',
+      'chore': 'Chore',
+      'test': 'Test',
+      'tests': 'Test',
+    };
+
+    // Find the first matching label
+    for (const label of labels) {
+      const workType = labelToWorkType[label.name.toLowerCase()];
+      if (workType) {
+        try {
+          await this.updateItemFieldValue(projectItemId, workTypeFieldName, workType);
+          return; // Stop after first match
+        } catch (error) {
+          // Field might not exist or value not in options
+        }
+      }
+    }
+  }
+
+  /**
+   * Sync Effort field from estimated effort string
+   * Takes effort like "2-4 hours" or "1-2 days" and converts to hours (number)
+   */
+  async syncEffortField(
+    issueNumber: number,
+    estimatedEffort?: string
+  ): Promise<void> {
+    if (!estimatedEffort) {
+      return;
+    }
+
+    const projectItemId = await this.getProjectItemIdByIssue(issueNumber);
+    if (!projectItemId) {
+      return;
+    }
+
+    const effortFieldName = this.config.fields.effort?.fieldName || 'Effort';
+
+    try {
+      // Parse effort string to number (convert to hours)
+      const effortHours = this.parseEffortToHours(estimatedEffort);
+      if (effortHours !== null) {
+        await this.updateItemNumberField(projectItemId, effortFieldName, effortHours);
+      }
+    } catch (error) {
+      // Field might not exist or parsing failed
+    }
+  }
+
+  /**
+   * Parse effort string to hours
+   * Examples: "2-4 hours" -> 3, "1-2 days" -> 12, "30 minutes" -> 0.5
+   */
+  private parseEffortToHours(effort: string): number | null {
+    const lowerEffort = effort.toLowerCase();
+
+    // Extract numbers
+    const numbers = lowerEffort.match(/\d+(\.\d+)?/g);
+    if (!numbers || numbers.length === 0) {
+      return null;
+    }
+
+    // Calculate average if range (e.g., "2-4 hours" -> 3)
+    const average = numbers.reduce((sum, n) => sum + parseFloat(n), 0) / numbers.length;
+
+    // Convert to hours based on unit
+    if (lowerEffort.includes('day')) {
+      return average * 8; // 1 day = 8 hours
+    } else if (lowerEffort.includes('week')) {
+      return average * 40; // 1 week = 40 hours
+    } else if (lowerEffort.includes('minute')) {
+      return average / 60; // Convert minutes to hours
+    } else {
+      // Assume hours if no unit or "hour" mentioned
+      return average;
+    }
+  }
+
+  /**
+   * Sync Area field from labels
+   * Looks for labels like "area:frontend", "area:backend", etc.
+   */
+  async syncAreaFromLabels(
+    issueNumber: number,
+    labels: Array<{ name: string }>
+  ): Promise<void> {
+    const projectItemId = await this.getProjectItemIdByIssue(issueNumber);
+    if (!projectItemId) {
+      return;
+    }
+
+    const areaFieldName = 'Area';
+
+    // Look for area:* labels
+    for (const label of labels) {
+      const name = label.name.toLowerCase();
+      if (name.startsWith('area:')) {
+        const area = name.split(':')[1];
+        // Capitalize first letter
+        const areaValue = area.charAt(0).toUpperCase() + area.slice(1);
+
+        try {
+          await this.updateItemFieldValue(projectItemId, areaFieldName, areaValue);
+          return;
+        } catch (error) {
+          // Might be a text field instead of single-select
+          try {
+            await this.updateItemTextField(projectItemId, areaFieldName, areaValue);
+            return;
+          } catch {
+            // Field doesn't exist or value not in options
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Clear all stale "Assigned Instance" values for items in pre-assignment statuses
+   * Pre-assignment statuses are: Todo, Ready, Evaluated
+   * These items should NEVER have an Assigned Instance set
+   */
+  async clearStaleAssignments(): Promise<{ cleared: number; errors: number }> {
+    const assignedInstanceFieldName = this.config.fields.assignedInstance?.fieldName;
+    if (!assignedInstanceFieldName) {
+      throw new Error('Assigned Instance field not configured');
+    }
+
+    // Get all items with pre-assignment statuses
+    const preAssignmentStatuses = this.config.fields.status.readyValues;
+    const result = await this.queryItems({
+      status: preAssignmentStatuses,
+      limit: 100,
+    });
+
+    let cleared = 0;
+    let errors = 0;
+
+    for (const item of result.items) {
+      try {
+        const assignedInstance = await this.getItemFieldValue(item.id, assignedInstanceFieldName);
+
+        if (assignedInstance) {
+          // Clear the stale assignment
+          await this.updateItemTextField(item.id, assignedInstanceFieldName, null);
+          cleared++;
+        }
+      } catch (error) {
+        errors++;
+      }
+    }
+
+    return { cleared, errors };
   }
 
   /**

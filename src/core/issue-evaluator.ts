@@ -1,19 +1,15 @@
 /**
  * Issue Evaluator - Intelligently evaluates and prioritizes GitHub issues
  *
- * SYNC STRATEGY:
- * - Caches AI-generated insights (complexity, impact, clarity, importance, feasibility, aiPriorityScore)
- * - Does NOT cache project fields (Priority, Area, Issue Type, Size) - those should be read fresh
- * - Re-evaluates when issue updatedAt > lastEvaluated
+ * Performs on-demand AI-powered evaluation of issues to assess:
+ * - Complexity, impact, clarity, importance, feasibility
+ * - AI priority score for intelligent work assignment
  */
 
-import { promises as fs } from 'fs';
-import { join } from 'path';
 import { $ } from 'zx';
 import chalk from 'chalk';
 import {
   IssueEvaluation,
-  EvaluationCache,
   EvaluationPromptContext,
   IssueScores,
 } from '../types/index.js';
@@ -24,95 +20,21 @@ import { GitHubProjectsAPI } from '../github/projects-api.js';
 import { IssueRelationshipParser } from '../utils/issue-relationship-parser.js';
 
 export class IssueEvaluator {
-  private cachePath: string;
-  private cache: EvaluationCache | null = null;
   private claudePath: string;
   private githubAPI: GitHubAPI | null = null;
   private projectsAPI: GitHubProjectsAPI | null = null;
 
   constructor(
-    projectPath: string,
     claudePath: string = 'claude',
     githubAPI?: GitHubAPI,
     projectsAPI?: GitHubProjectsAPI
   ) {
-    this.cachePath = join(projectPath, '.autonomous', 'issue-evaluations.json');
     this.claudePath = claudePath;
     this.githubAPI = githubAPI || null;
     this.projectsAPI = projectsAPI || null;
   }
 
-  /**
-   * Load evaluation cache from disk
-   */
-  async loadCache(): Promise<void> {
-    try {
-      const data = await fs.readFile(this.cachePath, 'utf-8');
-      this.cache = JSON.parse(data);
 
-      // Migrate old evaluation format to new schema (backward compatibility)
-      if (this.cache) {
-        for (const issueNum in this.cache.evaluations) {
-          const evaluation = this.cache.evaluations[issueNum];
-
-          // Migrate priority -> aiPriorityScore
-          if (!evaluation.scores.aiPriorityScore && (evaluation.scores as any).priority) {
-            evaluation.scores.aiPriorityScore = (evaluation.scores as any).priority;
-          }
-          // Ensure aiPriorityScore exists (fallback to default)
-          if (!evaluation.scores.aiPriorityScore) {
-            evaluation.scores.aiPriorityScore = 5;
-          }
-
-          // Add contentHash for old evaluations (they'll be re-evaluated if content changes)
-          if (!evaluation.contentHash) {
-            // Generate a placeholder hash - will be updated on next evaluation if content changed
-            evaluation.contentHash = 'legacy';
-          }
-        }
-      }
-    } catch (error) {
-      // Cache doesn't exist yet, initialize empty
-      this.cache = {
-        version: '1.0.0',
-        projectName: '',
-        lastUpdated: new Date().toISOString(),
-        evaluations: {},
-      };
-    }
-  }
-
-  /**
-   * Save evaluation cache to disk
-   */
-  async saveCache(): Promise<void> {
-    if (!this.cache) {
-      throw new Error('Cache not initialized');
-    }
-
-    this.cache.lastUpdated = new Date().toISOString();
-    await fs.writeFile(this.cachePath, JSON.stringify(this.cache, null, 2), 'utf-8');
-  }
-
-  /**
-   * Generate a content hash for an issue to detect actual content changes
-   * Ignores updatedAt to avoid re-evaluation when only comments are added
-   */
-  private generateIssueContentHash(issue: Issue): string {
-    const content = JSON.stringify({
-      title: issue.title,
-      body: issue.body,
-      labels: issue.labels.map((l: any) => l.name).sort(),
-    });
-    // Simple hash function
-    let hash = 0;
-    for (let i = 0; i < content.length; i++) {
-      const char = content.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash; // Convert to 32bit integer
-    }
-    return hash.toString(36);
-  }
 
   /**
    * Evaluate and prioritize a list of issues
@@ -120,41 +42,23 @@ export class IssueEvaluator {
    */
   async evaluateIssues(
     issues: Issue[],
-    options: { forceReeval?: boolean; verbose?: boolean; postClarificationComments?: boolean } = {}
-  ): Promise<{ evaluated: IssueEvaluation[]; skipped: Issue[]; totalEvaluated: number; usedCache: number }> {
-    if (!this.cache) {
-      await this.loadCache();
-    }
-
-    const { forceReeval = false, verbose = false, postClarificationComments = true } = options;
+    options: { verbose?: boolean; postClarificationComments?: boolean } = {}
+  ): Promise<{ evaluated: IssueEvaluation[]; skipped: Issue[]; totalEvaluated: number }> {
+    const { verbose = false, postClarificationComments = true } = options;
     const evaluated: IssueEvaluation[] = [];
     const skipped: Issue[] = [];
     let totalEvaluated = 0;
-    let usedCache = 0;
 
     console.log(chalk.blue(`\n🔍 Evaluating ${issues.length} issue(s)...\n`));
 
     for (const issue of issues) {
-      // Check if we need to re-evaluate based on content hash
-      const cachedEval = this.cache!.evaluations[issue.number];
-      const currentContentHash = this.generateIssueContentHash(issue);
+      if (verbose) {
+        console.log(chalk.gray(`Evaluating issue #${issue.number}: ${issue.title}`));
+      }
 
-      const needsEval =
-        forceReeval ||
-        !cachedEval ||
-        cachedEval.contentHash !== currentContentHash;
-
-      if (needsEval) {
-        if (verbose) {
-          console.log(chalk.gray(`Evaluating issue #${issue.number}: ${issue.title}`));
-        }
-
-        try {
-          const evaluation = await this.evaluateIssue(issue);
-          totalEvaluated++;
-
-          // Save to cache
-          this.cache!.evaluations[issue.number] = evaluation;
+      try {
+        const evaluation = await this.evaluateIssue(issue);
+        totalEvaluated++;
 
           if (evaluation.hasEnoughDetail) {
             evaluated.push(evaluation);
@@ -178,11 +82,37 @@ export class IssueEvaluator {
                     console.log(chalk.gray(`     ✓ Updated project status to "${statusConfig.evaluatedValue}"`));
                   }
 
-                  // Update Effort field with estimated effort
+                  // Update Effort field with estimated effort (converts to hours)
                   if (evaluation.estimatedEffort) {
-                    await this.projectsAPI.updateItemTextField(projectItemId, 'Effort', evaluation.estimatedEffort);
+                    await this.projectsAPI.syncEffortField(issue.number, evaluation.estimatedEffort);
                     if (verbose) {
                       console.log(chalk.gray(`     ✓ Set effort estimate: ${evaluation.estimatedEffort}`));
+                    }
+                  }
+
+                  // Add labels based on Issue Type
+                  const issueTypeConfig = (this.projectsAPI as any).config.fields.issueType;
+                  if (issueTypeConfig && this.githubAPI) {
+                    try {
+                      const issueType = await this.projectsAPI.getItemSelectFieldValue(
+                        projectItemId,
+                        issueTypeConfig.fieldName
+                      );
+
+                      if (issueType && issueTypeConfig.labelMappings) {
+                        const label = issueTypeConfig.labelMappings[issueType];
+                        if (label) {
+                          await this.githubAPI.addLabels(issue.number, [label]);
+                          if (verbose) {
+                            console.log(chalk.gray(`     ✓ Added "${label}" label based on Issue Type`));
+                          }
+                        }
+                      }
+                    } catch (error: any) {
+                      // Non-critical, just log
+                      if (verbose) {
+                        console.log(chalk.gray(`     ⚠️  Could not add Issue Type label: ${error.message}`));
+                      }
                     }
                   }
                 }
@@ -226,7 +156,7 @@ export class IssueEvaluator {
               }
             }
 
-            // Update project status to "Needs more info" if project integration is enabled
+            // Update project status to "Needs More Info" if project integration is enabled
             if (this.projectsAPI) {
               try {
                 const projectItemId = await this.projectsAPI.getProjectItemIdByIssue(issue.number);
@@ -268,33 +198,7 @@ export class IssueEvaluator {
 
         // Small delay to avoid rate limiting
         await this.sleep(500);
-      } else {
-        // Use cached evaluation
-        usedCache++;
-        if (cachedEval.hasEnoughDetail) {
-          evaluated.push(cachedEval);
-          if (verbose) {
-            console.log(
-              chalk.gray(
-                `✓ Using cached evaluation for #${issue.number} (AI priority: ${cachedEval.scores.aiPriorityScore.toFixed(1)})`
-              )
-            );
-          }
-        } else {
-          skipped.push(issue);
-          if (verbose) {
-            console.log(
-              chalk.gray(
-                `⊘ Using cached evaluation for #${issue.number} (needs more info)`
-              )
-            );
-          }
-        }
-      }
     }
-
-    // Save cache
-    await this.saveCache();
 
     // Sort by AI priority score (highest first)
     // NOTE: In Phase 1+, hybrid prioritization will combine this with project Priority
@@ -303,16 +207,9 @@ export class IssueEvaluator {
     console.log(chalk.green(`\n✓ Evaluation complete:`));
     console.log(`  ${chalk.bold(evaluated.length)} issues ready for assignment`);
     console.log(`  ${chalk.yellow(skipped.length)} issues need more detail`);
-    if (totalEvaluated > 0) {
-      console.log(`  ${chalk.dim(totalEvaluated)} evaluated with AI`);
-    }
-    if (usedCache > 0) {
-      console.log(`  ${chalk.dim(usedCache)} used cache\n`);
-    } else {
-      console.log('');
-    }
+    console.log(`  ${chalk.dim(totalEvaluated)} evaluated with AI\n`);
 
-    return { evaluated, skipped, totalEvaluated, usedCache };
+    return { evaluated, skipped, totalEvaluated };
   }
 
   /**
@@ -461,7 +358,6 @@ export class IssueEvaluator {
         issueTitle: issue.title,
         lastModified: issue.updatedAt,
         lastEvaluated: new Date().toISOString(),
-        contentHash: this.generateIssueContentHash(issue),
         classification: response.classification,
         scores: {
           ...response.scores,
@@ -483,7 +379,6 @@ export class IssueEvaluator {
         issueTitle: issue.title,
         lastModified: issue.updatedAt,
         lastEvaluated: new Date().toISOString(),
-        contentHash: this.generateIssueContentHash(issue),
         classification: {
           // NOTE: Area and Issue Type removed - read from project instead
           complexity: 'medium',
@@ -521,41 +416,7 @@ export class IssueEvaluator {
     return Math.round(aiPriorityScore * 10) / 10; // Round to 1 decimal
   }
 
-  /**
-   * Get evaluation for a specific issue
-   */
-  getEvaluation(issueNumber: number): IssueEvaluation | null {
-    if (!this.cache) {
-      return null;
-    }
-    return this.cache.evaluations[issueNumber] || null;
-  }
 
-  /**
-   * Get all evaluations sorted by AI priority score
-   * NOTE: In Phase 1+, use ProjectAwarePrioritizer for hybrid scoring
-   */
-  getAllEvaluations(): IssueEvaluation[] {
-    if (!this.cache) {
-      return [];
-    }
-    return Object.values(this.cache.evaluations).sort(
-      (a, b) => b.scores.aiPriorityScore - a.scores.aiPriorityScore
-    );
-  }
-
-  /**
-   * Clear evaluation cache
-   */
-  async clearCache(): Promise<void> {
-    this.cache = {
-      version: '1.0.0',
-      projectName: '',
-      lastUpdated: new Date().toISOString(),
-      evaluations: {},
-    };
-    await this.saveCache();
-  }
 
   /**
    * Post clarification comment to GitHub issue

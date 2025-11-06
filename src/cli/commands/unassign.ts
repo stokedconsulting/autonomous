@@ -47,10 +47,12 @@ export async function unassignCommand(issueNumber: string, options: UnassignOpti
 
     // Load configuration and assignment manager
     const configManager = new ConfigManager(cwd);
-    await configManager.load();
+    await configManager.initialize();
 
+    const { basename } = await import('path');
+    const projectName = basename(cwd);
     const assignmentManager = new AssignmentManager(cwd);
-    await assignmentManager.load();
+    await assignmentManager.initialize(projectName, cwd);
 
     // Find the assignment
     const assignment = assignmentManager.getAllAssignments().find((a) => a.issueNumber === issueNum);
@@ -81,12 +83,12 @@ export async function unassignCommand(issueNumber: string, options: UnassignOpti
       console.log(chalk.blue('\n🛑 Stopping Claude instance...'));
       try {
         const autonomousDataDir = join(cwd, '.autonomous');
-        const claudeConfig = configManager.getLLMConfig(assignment.llmProvider as any);
+        const claudeConfig = configManager.getLLMConfig(assignment.llmProvider);
         const claudeAdapter = new ClaudeAdapter(claudeConfig, autonomousDataDir);
         await claudeAdapter.stop(assignment.llmInstanceId);
         console.log(chalk.green('  ✓ Claude instance stopped'));
-      } catch (error: any) {
-        console.warn(chalk.yellow(`  ⚠️  Could not stop instance: ${error.message}`));
+      } catch (error: unknown) {
+        console.warn(chalk.yellow(`  ⚠️  Could not stop instance: ${error instanceof Error ? error.message : String(error)}`));
       }
     }
 
@@ -129,16 +131,16 @@ export async function unassignCommand(issueNumber: string, options: UnassignOpti
               try {
                 await $`git branch -D ${assignment.branchName}`;
                 console.log(chalk.green('  ✓ Branch deleted'));
-              } catch (error: any) {
-                console.warn(chalk.yellow(`  ⚠️  Could not delete branch: ${error.message}`));
+              } catch (error: unknown) {
+                console.warn(chalk.yellow(`  ⚠️  Could not delete branch: ${error instanceof Error ? error.message : String(error)}`));
               }
             }
           }
         } catch {
           console.log(chalk.gray('  Worktree already removed'));
         }
-      } catch (error: any) {
-        console.warn(chalk.yellow(`  ⚠️  Could not clean up worktree: ${error.message}`));
+      } catch (error: unknown) {
+        console.warn(chalk.yellow(`  ⚠️  Could not clean up worktree: ${error instanceof Error ? error.message : String(error)}`));
         console.log(chalk.gray(`  You may need to manually remove: ${worktreePath}`));
       }
     } else {
@@ -173,8 +175,8 @@ export async function unassignCommand(issueNumber: string, options: UnassignOpti
       console.log(chalk.gray('\n💡 Tip: You can still work in the worktree if needed'));
       console.log(chalk.gray('   cd ' + worktreePath));
     }
-  } catch (error: any) {
-    console.error(chalk.red('\n✗ Error unassigning issue:'), error.message);
+  } catch (error: unknown) {
+    console.error(chalk.red('\n✗ Error unassigning issue:'), error instanceof Error ? error.message : String(error));
     process.exit(1);
   }
 }

@@ -6,7 +6,7 @@
  * This script reads cached issue evaluations and updates the project status field
  * based on evaluation results:
  * - Issues with hasEnoughDetail: true → "Evaluated"
- * - Issues with hasEnoughDetail: false → "Needs more info"
+ * - Issues with hasEnoughDetail: false → "Needs More Info"
  *
  * Usage:
  *   node scripts/backfill-evaluation-status.mjs <project-path>

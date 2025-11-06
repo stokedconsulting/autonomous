@@ -34,7 +34,7 @@
         "doneValue": "Done",
         "blockedValue": "Blocked",
         "evaluatedValue": "Evaluated",
-        "needsMoreInfoValue": "Needs more info"
+        "needsMoreInfoValue": "Needs More Info"
       },
       "priority": {
         "fieldName": "Priority",
@@ -89,6 +89,11 @@
       "docs/**": "docs",
       "test/**": "test"
     }
+  },
+  "mergeWorker": {
+    "enabled": true,
+    "autoResolveConflicts": true,
+    "requireAllPersonasPass": false
   },
   "requirements": {
     "testingRequired": true,

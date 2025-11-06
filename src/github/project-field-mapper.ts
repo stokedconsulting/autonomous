@@ -41,6 +41,8 @@ export class ProjectFieldMapper {
       sprint: this.getSprintValue(fieldValues, this.config.fields.sprint?.fieldName),
       blockedBy: this.getFieldValue(fieldValues, 'Blocked By'),
       effortEstimate: this.getNumberValue(fieldValues, 'Effort Estimate'),
+      epic: this.getFieldValue(fieldValues, 'Epic'),
+      phase: this.getFieldValue(fieldValues, 'Phase'),
     };
   }
 
@@ -107,6 +109,38 @@ export class ProjectFieldMapper {
   async getReadyItemsWithMetadata(): Promise<ProjectItemWithMetadata[]> {
     const items = await this.projectsAPI.getReadyItems();
     return items.map((item) => this.mapItemWithMetadata(item));
+  }
+
+  /**
+   * Get items by status from GitHub Projects
+   */
+  async getItemsByStatus(status: string): Promise<ProjectItemWithMetadata[]> {
+    const allItems: ProjectItemWithMetadata[] = [];
+    let hasNextPage = true;
+    let cursor: string | undefined = undefined;
+
+    // Paginate through all items (GitHub API limit is 100 per page)
+    while (hasNextPage) {
+      const result = await this.projectsAPI.queryItems({
+        limit: 100,
+        cursor
+      });
+
+      // Filter items by status
+      const filteredItems = result.items.filter(item => {
+        const itemStatus = this.getFieldValue(item.fieldValues, this.config.fields.status.fieldName);
+        return itemStatus === status;
+      });
+
+      // Map to metadata and add to results
+      allItems.push(...filteredItems.map((item) => this.mapItemWithMetadata(item)));
+
+      // Check if there are more pages
+      hasNextPage = result.hasNextPage;
+      cursor = result.endCursor;
+    }
+
+    return allItems;
   }
 
   /**

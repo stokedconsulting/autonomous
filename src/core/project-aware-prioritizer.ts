@@ -263,6 +263,7 @@ export class ProjectAwarePrioritizer {
     prioritizedIssues: PrioritizedIssue[],
     projectMetadataMap: Map<number, ProjectItemMetadata>
   ): PrioritizedIssue[] {
+    console.log('readyStatus', this.config.fields.status.readyValues, this.config.fields.status.evaluatedValue); 
     const readyStatuses = [
       ...this.config.fields.status.readyValues,
       this.config.fields.status.evaluatedValue,

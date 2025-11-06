@@ -19,6 +19,7 @@ import {
   AssignmentStatus,
   LLMProvider,
 } from '../types/index.js';
+import { getGitRoot } from '../git/utils.js';
 
 // Logger interface for conflict detection
 interface Logger {
@@ -39,6 +40,7 @@ export interface ProjectAPI {
   getItemStatus(projectItemId: string): Promise<AssignmentStatus | null>;
   updateItemStatus(projectItemId: string, status: AssignmentStatus): Promise<void>;
   getProjectItemId(issueNumber: number): Promise<string | null>;
+  updateAssignedInstance?(projectItemId: string, instanceId: string | null): Promise<void>;
 }
 
 export class AssignmentManager {
@@ -46,21 +48,58 @@ export class AssignmentManager {
   private data: AssignmentsFile | null = null;
   private projectAPI?: ProjectAPI;
   private logger: Logger;
+  private projectPath: string;
+  private gitRoot: string | null = null;
 
   constructor(projectPath: string, options?: { projectAPI?: ProjectAPI; logger?: Logger }) {
-    this.filePath = join(projectPath, 'autonomous-assignments.json');
+    this.projectPath = projectPath;
+    // filePath will be set in initialize() after getting git root
+    this.filePath = join(projectPath, 'autonomous-assignments.json'); // temporary fallback
     this.projectAPI = options?.projectAPI;
     this.logger = options?.logger || defaultLogger;
   }
 
   /**
    * Initialize or load the assignments file
+   *
+   * ⚠️ CENTRALIZED PATH RESOLUTION LOGIC ⚠️
+   * Similar to ConfigManager, this checks both old and new locations
+   * for backward compatibility with pre-migration repositories.
+   *
+   * Path Resolution Strategy:
+   * 1. Pre-migration (v0.0.1): autonomous-assignments.json in git root
+   * 2. Post-migration (v0.1.0+): .autonomous/autonomous-assignments.json
    */
   async initialize(projectName: string, projectPath: string): Promise<void> {
-    try {
-      await this.load();
-    } catch (error) {
-      // File doesn't exist, create it
+    // Get git root directory
+    this.gitRoot = await getGitRoot(this.projectPath);
+    if (!this.gitRoot) {
+      throw new Error('Not a git repository or git root not found');
+    }
+
+    // CENTRALIZED PATH LOGIC - check both old and new locations
+    const newAssignmentsPath = join(this.gitRoot, '.autonomous', 'autonomous-assignments.json');
+    const oldAssignmentsPath = join(this.gitRoot, 'autonomous-assignments.json');
+
+    let loaded = false;
+
+    // Try new location first, then old location
+    for (const assignmentsPath of [newAssignmentsPath, oldAssignmentsPath]) {
+      try {
+        this.filePath = assignmentsPath;
+        await this.load();
+        loaded = true;
+        break;
+      } catch (error) {
+        // Continue to next path
+      }
+    }
+
+    // Always use new location for saving (migrations will move file here)
+    this.filePath = newAssignmentsPath;
+
+    if (!loaded) {
+      // File doesn't exist in either location, create it
       this.data = {
         version: '1.0.0',
         projectName,
@@ -88,6 +127,10 @@ export class AssignmentManager {
     if (!this.data) {
       throw new Error('Assignment data not initialized');
     }
+
+    // Ensure .autonomous directory exists
+    const autonomousDir = join(this.gitRoot || this.projectPath, '.autonomous');
+    await fs.mkdir(autonomousDir, { recursive: true });
 
     this.data.updatedAt = new Date().toISOString();
     await fs.writeFile(this.filePath, JSON.stringify(this.data, null, 2), 'utf-8');
@@ -143,6 +186,14 @@ export class AssignmentManager {
   }
 
   /**
+   * Get assignment by LLM instance ID
+   */
+  getAssignmentByLLMInstanceId(instanceId: string): Assignment | undefined {
+    if (!this.data) return undefined;
+    return this.data.assignments.find((a) => a.llmInstanceId === instanceId);
+  }
+
+  /**
    * Get assignments by status
    */
   getAssignmentsByStatus(status: AssignmentStatus): Assignment[] {
@@ -186,13 +237,14 @@ export class AssignmentManager {
       // Set timestamps based on status
       if (update.status === 'in-progress' && !assignment.startedAt) {
         assignment.startedAt = new Date().toISOString();
-      } else if (update.status === 'llm-complete' && !assignment.completedAt) {
+      } else if (update.status === 'dev-complete' && !assignment.completedAt) {
         assignment.completedAt = new Date().toISOString();
       } else if (update.status === 'merged' && !assignment.mergedAt) {
         assignment.mergedAt = new Date().toISOString();
       }
     }
 
+    if (update.processId !== undefined) assignment.processId = update.processId;
     if (update.prNumber !== undefined) assignment.prNumber = update.prNumber;
     if (update.prUrl !== undefined) assignment.prUrl = update.prUrl;
     if (update.ciStatus !== undefined) assignment.ciStatus = update.ciStatus;
@@ -425,6 +477,21 @@ export class AssignmentManager {
         // This allows degraded operation when project API is unavailable
       }
     }
+
+    // Clear Assigned Instance when work is complete (dev-complete, merged)
+    // The LLM process is finished and slot should be freed
+    if ((newStatus === 'dev-complete' || newStatus === 'merged') && this.projectAPI && assignment.projectItemId) {
+      try {
+        await this.updateAssignedInstanceWithSync(assignmentId, null);
+        this.logger.info(`Cleared assigned instance for #${assignment.issueNumber} (status: ${newStatus})`);
+      } catch (error) {
+        this.logger.warn(
+          `Failed to clear assigned instance for #${assignment.issueNumber}: ` +
+            `${error instanceof Error ? error.message : String(error)}`
+        );
+        // Don't throw - status update succeeded, instance clearing failed
+      }
+    }
   }
 
   /**
@@ -448,8 +515,8 @@ export class AssignmentManager {
     if (this.projectAPI && assignment.projectItemId) {
       try {
         // Check if projectAPI has the updateAssignedInstance method
-        if ('updateAssignedInstance' in this.projectAPI) {
-          await (this.projectAPI as any).updateAssignedInstance(
+        if ('updateAssignedInstance' in this.projectAPI && this.projectAPI.updateAssignedInstance) {
+          await this.projectAPI.updateAssignedInstance(
             assignment.projectItemId,
             instanceId
           );
@@ -549,7 +616,7 @@ export class AssignmentManager {
       try {
         const projectStatus = await this.projectAPI.getItemStatus(assignment.projectItemId);
 
-        // Skip unmapped statuses (Needs more info, Evaluated, etc)
+        // Skip unmapped statuses (Needs More Info, Evaluated, etc)
         if (projectStatus !== null && assignment.status !== projectStatus) {
           conflicts++;
           this.logger.warn(

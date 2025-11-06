@@ -41,7 +41,7 @@ async function init(options: InitOptions): Promise<void> {
 
     if (exists) {
       console.log(chalk.blue('Configuration exists - verifying setup...\n'));
-      await configManager.load();
+      await configManager.initialize();
     } else {
       console.log(chalk.blue('Initializing auto configuration...\n'));
     }
@@ -109,7 +109,7 @@ async function init(options: InitOptions): Promise<void> {
     }
 
     // Setup project integration
-    await configManager.load();
+    await configManager.initialize();
     const config = configManager.getConfig();
 
     if (options.project !== false && githubOwner && githubRepo) {
@@ -132,13 +132,13 @@ async function init(options: InitOptions): Promise<void> {
               fields: {
                 status: {
                   fieldName: 'Status',
-                  readyValues: ['Todo', 'Ready'],
+                  readyValues: ['Todo', 'Ready', 'Evaluated'],
                   inProgressValue: 'In Progress',
                   reviewValue: 'In Review',
                   doneValue: 'Done',
                   blockedValue: 'Blocked',
                   evaluatedValue: 'Evaluated',
-                  needsMoreInfoValue: 'Needs more info',
+                  needsMoreInfoValue: 'Needs More Info',
                 },
                 priority: {
                   fieldName: 'Priority',
@@ -223,7 +223,7 @@ async function addLLM(provider: string, options: AddLLMOptions): Promise<void> {
     const configManager = new ConfigManager(cwd);
 
     // Load existing config
-    await configManager.load();
+    await configManager.initialize();
 
     // Parse CLI args if provided (space-separated string to array)
     const cliArgs = options.cliArgs
@@ -271,7 +271,7 @@ async function show(options: ShowOptions): Promise<void> {
     const cwd = process.cwd();
     const configManager = new ConfigManager(cwd);
 
-    await configManager.load();
+    await configManager.initialize();
     const config = configManager.getConfig();
 
     if (options.json) {
@@ -325,7 +325,7 @@ async function validate(): Promise<void> {
     const cwd = process.cwd();
     const configManager = new ConfigManager(cwd);
 
-    await configManager.load();
+    await configManager.initialize();
     const validation = configManager.validate();
 
     if (validation.valid) {

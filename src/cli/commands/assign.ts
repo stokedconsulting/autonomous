@@ -38,7 +38,7 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
 
     // Load configuration
     const configManager = new ConfigManager(cwd);
-    await configManager.load();
+    await configManager.initialize();
     const config = configManager.getConfig();
 
     // Get GitHub token
@@ -85,44 +85,22 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
       console.log(chalk.blue('\n📋 Evaluating issue...'));
 
       const claudePath = config.llms?.claude?.cliPath || 'claude';
-      const issueEvaluator = new IssueEvaluator(cwd, claudePath, githubAPI);
+      const issueEvaluator = new IssueEvaluator(claudePath, githubAPI);
 
-      await issueEvaluator.loadCache();
+      const { evaluated, skipped } = await issueEvaluator.evaluateIssues([issue], {
+        verbose: options.verbose,
+      });
 
-      // Check if already evaluated and fresh
-      const cachedEval = issueEvaluator.getEvaluation(issueNum);
-      const needsEval = !cachedEval || new Date(issue.updatedAt) > new Date(cachedEval.lastModified);
-
-      if (needsEval || options.verbose) {
-        const { evaluated, skipped } = await issueEvaluator.evaluateIssues([issue], {
-          forceReeval: needsEval,
-          verbose: options.verbose,
-        });
-
-        if (skipped.length > 0) {
-          const evaluation = issueEvaluator.getEvaluation(issueNum);
-          console.log(chalk.yellow('\n⚠️  This issue may not have enough detail for autonomous work:'));
-          console.log(chalk.gray(`  Clarity: ${evaluation?.scores.clarity}/10`));
-          console.log(chalk.gray(`  Feasibility: ${evaluation?.scores.feasibility}/10`));
-
-          if (evaluation?.suggestedQuestions && evaluation.suggestedQuestions.length > 0) {
-            console.log(chalk.gray('\n  Suggested questions to clarify:'));
-            evaluation.suggestedQuestions.forEach((q) => {
-              console.log(chalk.gray(`    - ${q}`));
-            });
-          }
-
-          console.log(chalk.yellow('\nContinuing anyway, but may require additional clarification...'));
-        } else if (evaluated.length > 0) {
-          const evaluation = evaluated[0];
-          console.log(chalk.green('\n✓ Issue evaluation:'));
-          console.log(chalk.gray(`  AI Priority: ${evaluation.scores.aiPriorityScore.toFixed(1)}/10`));
-          console.log(chalk.gray(`  Complexity: ${evaluation.classification.complexity}`));
-          console.log(chalk.gray(`  Impact: ${evaluation.classification.impact}`));
-          console.log(chalk.gray(`  Estimated: ${evaluation.estimatedEffort}`));
-        }
-      } else {
-        console.log(chalk.green('✓ Using cached evaluation'));
+      if (skipped.length > 0 && evaluated.length === 0) {
+        console.log(chalk.yellow('\n⚠️  This issue may not have enough detail for autonomous work.'));
+        console.log(chalk.yellow('Continuing anyway, but may require additional clarification...'));
+      } else if (evaluated.length > 0) {
+        const evaluation = evaluated[0];
+        console.log(chalk.green('\n✓ Issue evaluation:'));
+        console.log(chalk.gray(`  AI Priority: ${evaluation.scores.aiPriorityScore.toFixed(1)}/10`));
+        console.log(chalk.gray(`  Complexity: ${evaluation.classification.complexity}`));
+        console.log(chalk.gray(`  Impact: ${evaluation.classification.impact}`));
+        console.log(chalk.gray(`  Estimated: ${evaluation.estimatedEffort}`));
       }
     }
 
@@ -136,6 +114,7 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '')
       .substring(0, 50);
+      
     const branchName = `${config.worktree.branchPrefix || 'feature/issue-'}${issueNum}-${slugTitle}`;
 
     // Check if worktree already exists
@@ -181,6 +160,12 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
 
     console.log(chalk.green(`✓ Assigned to slot: ${availableSlot.instanceId}`));
 
+    // Detect if this is a phase master issue
+    const isPhaseMaster = PromptBuilder.isPhaseMaster(issue.title);
+    if (isPhaseMaster) {
+      console.log(chalk.blue('📋 Phase Master detected - will use coordination workflow'));
+    }
+
     // Create assignment
     console.log(chalk.blue('\n📝 Creating assignment...'));
     const assignment = await assignmentManager.createAssignment({
@@ -195,11 +180,17 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
       // NOTE: labels removed - read from GitHub/project instead
     });
 
-    // Update assignment with slot-based instance ID
+    // Update assignment with slot-based instance ID and phase master flag
     await assignmentManager.updateAssignment(assignment.id, {
       llmInstanceId: availableSlot.instanceId,
     });
     assignment.llmInstanceId = availableSlot.instanceId; // Update in-memory reference
+
+    // Set phase master flag in metadata
+    if (isPhaseMaster && assignment.metadata) {
+      assignment.metadata.isPhaseMaster = true;
+      await assignmentManager.save();
+    }
 
     // Link assignment to project item if project integration enabled
     if (projectsAPI) {
@@ -259,8 +250,8 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
     console.log(chalk.blue(`\n📊 Monitor progress:`));
     console.log(chalk.gray(`  tail -f ${logFile}`));
     console.log(chalk.gray(`  auto status`));
-  } catch (error: any) {
-    console.error(chalk.red('\n✗ Error assigning issue:'), error.message);
+  } catch (error: unknown) {
+    console.error(chalk.red('\n✗ Error assigning issue:'), error instanceof Error ? error.message : String(error));
     if (options.verbose) {
       console.error(error);
     }

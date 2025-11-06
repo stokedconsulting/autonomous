@@ -1,0 +1,169 @@
+@startuml
+!theme blueprint
+
+title Autonomous System - Complete Status State Machine
+skinparam backgroundColor #FEFEFE
+skinparam state {
+  BackgroundColor<<ready>> LightGreen
+  BackgroundColor<<working>> LightBlue
+  BackgroundColor<<complete>> LightCyan
+  BackgroundColor<<terminal>> LightGray
+  BackgroundColor<<blocked>> LightCoral
+  BorderColor Black
+  FontSize 12
+}
+
+state "GitHub Project Status Flow" as GitHubFlow {
+
+  [*] --> IssueCreated : New Issue
+
+  state "Issue Created" as IssueCreated
+  IssueCreated --> AIEvaluation : Auto-Evaluate
+
+  state "AI Evaluation" as AIEvaluation <<choice>>
+  AIEvaluation --> Evaluated : Has Enough Detail
+  AIEvaluation --> NeedsMoreInfo : Needs Clarification
+
+  state "Available States" as AvailableStates {
+    state "Ready" as Ready <<ready>>
+    state "Todo" as Todo <<ready>>
+    state "Evaluated" as Evaluated <<ready>>
+  }
+
+  state "Active Work States" as ActiveStates {
+    state "In Progress" as InProgress <<working>> {
+      state "Process Running" as ProcessRunning
+      state "Check Process" as CheckProcess
+
+      [*] --> ProcessRunning : LLM Started
+      ProcessRunning --> CheckProcess : Every 60s
+      CheckProcess --> ProcessRunning : Still Running
+      CheckProcess --> ProcessDead : PID Not Found
+      CheckProcess --> SessionComplete : Session File Exists
+
+      state "Process Dead" as ProcessDead
+      ProcessDead --> ProcessRunning : Resurrect\n(every 3m)
+    }
+  }
+
+  state "Completion States" as CompletionStates {
+    state "Dev Complete" as DevComplete <<complete>>
+    state "Merge Review" as MergeReview <<complete>>
+    state "Stage Ready" as StageReady <<complete>>
+  }
+
+  state "Terminal States" as TerminalStates {
+    state "In Review" as InReview <<terminal>>
+    state "Done" as Done <<terminal>>
+  }
+
+  state "Blocked State" as BlockedState {
+    state "Needs more info" as NeedsMoreInfo <<blocked>>
+  }
+
+  ' Transitions to In Progress
+  Ready --> InProgress : Auto-Assign\n(capacity available)
+  Todo --> InProgress : Auto-Assign\n(capacity available)
+  Evaluated --> InProgress : Auto-Assign\n(capacity available)
+
+  ' Transitions from In Progress
+  SessionComplete --> DevComplete : Process Complete\n+ Session File
+
+  ' Dev Complete branching
+  state "Merge Worker?" as MergeWorkerChoice <<choice>>
+  DevComplete --> MergeWorkerChoice
+
+  MergeWorkerChoice --> MergeReview : Enabled
+  MergeWorkerChoice --> InReview : Disabled
+
+  ' Merge Review outcomes
+  state "Review Outcome?" as ReviewOutcome <<choice>>
+  MergeReview --> ReviewOutcome
+
+  ReviewOutcome --> StageReady : All Personas\nApprove
+  ReviewOutcome --> Ready : Personas\nReject
+
+  ' Stage Ready to Done
+  StageReady --> Done : Manual Push\nstage → main
+
+  ' Manual Review to Done
+  InReview --> Done : PR Merged\n(Manual)
+
+  ' Unblock flow
+  NeedsMoreInfo --> Ready : Info Provided
+  NeedsMoreInfo --> [*] : Issue Closed
+
+  ' Terminal
+  Done --> [*]
+}
+
+note right of Ready
+  **Capacity Check**
+  activeCount = in-progress items
+  available = maxConcurrent - active
+
+  Only assign if available > 0
+end note
+
+note right of InProgress
+  **Monitoring Loop**
+  • Check completion: 60s
+  • Resurrect dead: 3m
+  • Sync GitHub: 5m
+  • Evaluate new: 10m
+
+  **Dead Process Detection**
+  1. Check PID running
+  2. If dead → Resurrect
+  3. Update instance ID
+end note
+
+note right of DevComplete
+  **LLM Slot Released**
+  Process ended
+  → Frees capacity
+  → New assignments possible
+
+  Merge worker runs
+  independently
+end note
+
+note right of MergeReview
+  **Persona Reviews**
+  • Security Engineer
+  • Performance Engineer
+  • Quality Engineer
+  • System Architect
+
+  All must approve
+  OR review fails
+end note
+
+note right of StageReady
+  **Manual Gate**
+  Requires human approval
+  to push stage → main
+
+  Prevents automated
+  production deployment
+end note
+
+note left of NeedsMoreInfo
+  **Blocking Issues**
+  • Missing requirements
+  • Unclear acceptance criteria
+  • Needs design decisions
+
+  Auto-labels: needs-details
+end note
+
+legend right
+  |= Status Type |= Color |= Count Against Capacity? |
+  | Ready States | <back:LightGreen>   </back> | No |
+  | Working States | <back:LightBlue>   </back> | Yes |
+  | Complete States | <back:LightCyan>   </back> | No |
+  | Terminal States | <back:LightGray>   </back> | No |
+  | Blocked States | <back:LightCoral>   </back> | No |
+endlegend
+
+@enduml
