@@ -1,25 +1,23 @@
 /**
- * Assignment Manager - Handles autonomous-assignments.json
+ * Assignment Manager - In-Memory Assignment Management
  *
- * SYNC STRATEGY:
- * - Local JSON is source of truth for process state (worktrees, sessions, timestamps)
- * - GitHub Projects is source of truth for user-visible status
- * - Conflicts are detected and resolved (project wins for status)
+ * ARCHITECTURE CHANGE:
+ * - Assignments are stored in-memory only (no JSON file persistence)
+ * - GitHub Projects is the source of truth
+ * - Assignment data is derived from GitHub Projects on startup
+ * - Process state (PIDs, worktrees) is ephemeral and tracked in-memory
  */
 
-import { promises as fs } from 'fs';
-import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import {
   Assignment,
-  AssignmentsFile,
   CreateAssignmentInput,
   UpdateAssignmentInput,
   AddWorkSessionInput,
   AssignmentStatus,
   LLMProvider,
 } from '../types/index.js';
-import { getGitRoot } from '../git/utils.js';
+import { REVERSE_STATUS_MAPPING } from '../github/projects-api.js';
 
 // Logger interface for conflict detection
 interface Logger {
@@ -41,109 +39,33 @@ export interface ProjectAPI {
   updateItemStatus(projectItemId: string, status: AssignmentStatus): Promise<void>;
   getProjectItemId(issueNumber: number): Promise<string | null>;
   updateAssignedInstance?(projectItemId: string, instanceId: string | null): Promise<void>;
+  getItemFieldValue?(projectItemId: string, fieldName: string): Promise<any>;
+  queryItems?(filters?: any): Promise<any>;
+  getAllItems?(filters?: any): Promise<any>;
 }
 
 export class AssignmentManager {
-  private filePath: string;
-  private data: AssignmentsFile | null = null;
+  private assignments: Assignment[] = [];
   private projectAPI?: ProjectAPI;
   private logger: Logger;
-  private projectPath: string;
-  private gitRoot: string | null = null;
 
-  constructor(projectPath: string, options?: { projectAPI?: ProjectAPI; logger?: Logger }) {
-    this.projectPath = projectPath;
-    // filePath will be set in initialize() after getting git root
-    this.filePath = join(projectPath, 'autonomous-assignments.json'); // temporary fallback
+  constructor(_projectPath: string, options?: { projectAPI?: ProjectAPI; logger?: Logger }) {
     this.projectAPI = options?.projectAPI;
     this.logger = options?.logger || defaultLogger;
   }
 
   /**
-   * Initialize or load the assignments file
-   *
-   * ⚠️ CENTRALIZED PATH RESOLUTION LOGIC ⚠️
-   * Similar to ConfigManager, this checks both old and new locations
-   * for backward compatibility with pre-migration repositories.
-   *
-   * Path Resolution Strategy:
-   * 1. Pre-migration (v0.0.1): autonomous-assignments.json in git root
-   * 2. Post-migration (v0.1.0+): .autonomous/autonomous-assignments.json
+   * Initialize the assignment manager
+   * No longer loads from file - assignments are in-memory only
    */
-  async initialize(projectName: string, projectPath: string): Promise<void> {
-    // Get git root directory
-    this.gitRoot = await getGitRoot(this.projectPath);
-    if (!this.gitRoot) {
-      throw new Error('Not a git repository or git root not found');
-    }
-
-    // CENTRALIZED PATH LOGIC - check both old and new locations
-    const newAssignmentsPath = join(this.gitRoot, '.autonomous', 'autonomous-assignments.json');
-    const oldAssignmentsPath = join(this.gitRoot, 'autonomous-assignments.json');
-
-    let loaded = false;
-
-    // Try new location first, then old location
-    for (const assignmentsPath of [newAssignmentsPath, oldAssignmentsPath]) {
-      try {
-        this.filePath = assignmentsPath;
-        await this.load();
-        loaded = true;
-        break;
-      } catch (error) {
-        // Continue to next path
-      }
-    }
-
-    // Always use new location for saving (migrations will move file here)
-    this.filePath = newAssignmentsPath;
-
-    if (!loaded) {
-      // File doesn't exist in either location, create it
-      this.data = {
-        version: '1.0.0',
-        projectName,
-        projectPath,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-        assignments: [],
-      };
-      await this.save();
-    }
-  }
-
-  /**
-   * Load assignments from file
-   */
-  async load(): Promise<void> {
-    const content = await fs.readFile(this.filePath, 'utf-8');
-    this.data = JSON.parse(content);
-  }
-
-  /**
-   * Save assignments to file
-   */
-  async save(): Promise<void> {
-    if (!this.data) {
-      throw new Error('Assignment data not initialized');
-    }
-
-    // Ensure .autonomous directory exists
-    const autonomousDir = join(this.gitRoot || this.projectPath, '.autonomous');
-    await fs.mkdir(autonomousDir, { recursive: true });
-
-    this.data.updatedAt = new Date().toISOString();
-    await fs.writeFile(this.filePath, JSON.stringify(this.data, null, 2), 'utf-8');
+  async initialize(projectName: string, _projectPath: string): Promise<void> {
+    this.logger.info(`Initialized AssignmentManager for project: ${projectName}`);
   }
 
   /**
    * Create a new assignment
    */
   async createAssignment(input: CreateAssignmentInput): Promise<Assignment> {
-    if (!this.data) {
-      throw new Error('Assignment manager not initialized');
-    }
-
     const assignment: Assignment = {
       id: uuidv4(),
       issueNumber: input.issueNumber,
@@ -163,9 +85,7 @@ export class AssignmentManager {
       },
     };
 
-    this.data.assignments.push(assignment);
-    await this.save();
-
+    this.assignments.push(assignment);
     return assignment;
   }
 
@@ -173,59 +93,49 @@ export class AssignmentManager {
    * Get an assignment by ID
    */
   getAssignment(assignmentId: string): Assignment | undefined {
-    if (!this.data) return undefined;
-    return this.data.assignments.find((a) => a.id === assignmentId);
+    return this.assignments.find((a) => a.id === assignmentId);
   }
 
   /**
    * Get an assignment by issue number
    */
   getAssignmentByIssue(issueNumber: number): Assignment | undefined {
-    if (!this.data) return undefined;
-    return this.data.assignments.find((a) => a.issueNumber === issueNumber);
+    return this.assignments.find((a) => a.issueNumber === issueNumber);
   }
 
   /**
    * Get assignment by LLM instance ID
    */
   getAssignmentByLLMInstanceId(instanceId: string): Assignment | undefined {
-    if (!this.data) return undefined;
-    return this.data.assignments.find((a) => a.llmInstanceId === instanceId);
+    return this.assignments.find((a) => a.llmInstanceId === instanceId);
   }
 
   /**
    * Get assignments by status
    */
   getAssignmentsByStatus(status: AssignmentStatus): Assignment[] {
-    if (!this.data) return [];
-    return this.data.assignments.filter((a) => a.status === status);
+    return this.assignments.filter((a) => a.status === status);
   }
 
   /**
    * Get assignments by LLM provider
    */
   getAssignmentsByProvider(provider: LLMProvider): Assignment[] {
-    if (!this.data) return [];
-    return this.data.assignments.filter((a) => a.llmProvider === provider);
+    return this.assignments.filter((a) => a.llmProvider === provider);
   }
 
   /**
    * Get all assignments
    */
   getAllAssignments(): Assignment[] {
-    if (!this.data) return [];
-    return [...this.data.assignments];
+    return [...this.assignments];
   }
 
   /**
    * Update an assignment
    */
   async updateAssignment(assignmentId: string, update: UpdateAssignmentInput): Promise<void> {
-    if (!this.data) {
-      throw new Error('Assignment manager not initialized');
-    }
-
-    const assignment = this.data.assignments.find((a) => a.id === assignmentId);
+    const assignment = this.assignments.find((a) => a.id === assignmentId);
     if (!assignment) {
       throw new Error(`Assignment ${assignmentId} not found`);
     }
@@ -253,19 +163,13 @@ export class AssignmentManager {
     } else {
       assignment.lastActivity = new Date().toISOString();
     }
-
-    await this.save();
   }
 
   /**
    * Add a work session to an assignment
    */
   async addWorkSession(assignmentId: string, session: AddWorkSessionInput): Promise<void> {
-    if (!this.data) {
-      throw new Error('Assignment manager not initialized');
-    }
-
-    const assignment = this.data.assignments.find((a) => a.id === assignmentId);
+    const assignment = this.assignments.find((a) => a.id === assignmentId);
     if (!assignment) {
       throw new Error(`Assignment ${assignmentId} not found`);
     }
@@ -278,8 +182,6 @@ export class AssignmentManager {
     });
 
     assignment.lastActivity = new Date().toISOString();
-
-    await this.save();
   }
 
   /**
@@ -289,11 +191,7 @@ export class AssignmentManager {
     assignmentId: string,
     update: Partial<AddWorkSessionInput>
   ): Promise<void> {
-    if (!this.data) {
-      throw new Error('Assignment manager not initialized');
-    }
-
-    const assignment = this.data.assignments.find((a) => a.id === assignmentId);
+    const assignment = this.assignments.find((a) => a.id === assignmentId);
     if (!assignment) {
       throw new Error(`Assignment ${assignmentId} not found`);
     }
@@ -309,40 +207,61 @@ export class AssignmentManager {
     if (update.promptUsed !== undefined) lastSession.promptUsed = update.promptUsed;
 
     assignment.lastActivity = new Date().toISOString();
-
-    await this.save();
   }
 
   /**
    * Delete an assignment
    */
   async deleteAssignment(assignmentId: string): Promise<void> {
-    if (!this.data) {
-      throw new Error('Assignment manager not initialized');
-    }
-
-    const index = this.data.assignments.findIndex((a) => a.id === assignmentId);
+    const index = this.assignments.findIndex((a) => a.id === assignmentId);
     if (index === -1) {
       throw new Error(`Assignment ${assignmentId} not found`);
     }
 
-    this.data.assignments.splice(index, 1);
-    await this.save();
+    this.assignments.splice(index, 1);
   }
 
   /**
    * Get count of active assignments (assigned or in-progress)
-   * NOTE: This trusts the local database and does NOT sync from GitHub.
+   * NOTE: This trusts the local in-memory state and does NOT sync from GitHub.
    * Use syncStatusFromGitHub() separately if you need to detect manual status changes.
    */
   async getActiveAssignmentsCount(provider: LLMProvider): Promise<number> {
-    if (!this.data) return 0;
-
-    // Count only assignments that are actually active (assigned or in-progress)
-    // Trust local database - hooks will update status when work completes
-    return this.data.assignments.filter(
+    // Count in-memory assignments
+    const localCount = this.assignments.filter(
       (a) => a.llmProvider === provider && (a.status === 'assigned' || a.status === 'in-progress')
     ).length;
+
+    // If we have ProjectsAPI, also check GitHub for items with assigned instances
+    // This handles cases where local cache is out of sync (e.g., deleted)
+    if (this.projectAPI && this.projectAPI.getAllItems) {
+      try {
+        const allItems = await this.projectAPI.getAllItems();
+        const assignedInstanceFieldName = 'Assigned Instance';
+
+        // Count items in GitHub with assigned instances
+        // NOTE: item.fieldValues is a Record<string, any>, NOT an array
+        let githubCount = 0;
+        for (const item of allItems) {
+          // Check if assigned instance field has a value
+          if (item.fieldValues) {
+            const assignedValue = item.fieldValues[assignedInstanceFieldName];
+            if (assignedValue && typeof assignedValue === 'string') {
+              githubCount++;
+            }
+          }
+        }
+
+        // Return the maximum of local or GitHub count to be conservative
+        return Math.max(localCount, githubCount);
+      } catch (error) {
+        // If GitHub query fails, fall back to local count
+        this.logger.warn(`Failed to query GitHub for active count: ${error instanceof Error ? error.message : String(error)}`);
+        return localCount;
+      }
+    }
+
+    return localCount;
   }
 
   /**
@@ -350,11 +269,11 @@ export class AssignmentManager {
    * Only call this periodically to detect manual status changes
    */
   async syncStatusFromGitHub(provider?: LLMProvider): Promise<void> {
-    if (!this.data || !this.projectAPI) return;
+    if (!this.projectAPI) return;
 
     const assignments = provider
-      ? this.data.assignments.filter(a => a.llmProvider === provider)
-      : this.data.assignments;
+      ? this.assignments.filter(a => a.llmProvider === provider)
+      : this.assignments;
 
     for (const assignment of assignments) {
       if (assignment.projectItemId) {
@@ -372,16 +291,220 @@ export class AssignmentManager {
         }
       }
     }
-    // Save any status changes
-    await this.save();
+  }
+
+  /**
+   * Comprehensive sync of all fields from GitHub Projects
+   * - Syncs status AND assigned instance
+   * - Removes orphaned local assignments
+   * - Clears stale assigned instances in GitHub
+   * - More efficient than syncStatusFromGitHub (uses bulk queries)
+   */
+  async syncAllFieldsFromGitHub(config?: {
+    assignedInstanceFieldName?: string;
+    readyStatuses?: string[];
+    completeStatuses?: string[];
+  }): Promise<{
+    synced: number;
+    conflicts: number;
+    removed: number;
+    clearedStale: number;
+    errors: number;
+  }> {
+    if (!this.projectAPI) {
+      this.logger.warn('No project API available for sync');
+      return { synced: 0, conflicts: 0, removed: 0, clearedStale: 0, errors: 0 };
+    }
+
+    // Check if advanced methods are available
+    if (!this.projectAPI.queryItems || !this.projectAPI.getItemFieldValue) {
+      this.logger.warn('Project API does not support bulk queries, falling back to syncStatusFromGitHub');
+      await this.syncStatusFromGitHub();
+      return { synced: this.assignments.length, conflicts: 0, removed: 0, clearedStale: 0, errors: 0 };
+    }
+
+    const assignedInstanceFieldName = config?.assignedInstanceFieldName || 'Assigned Instance';
+    const readyStatuses = config?.readyStatuses || ['Ready'];
+    const completeStatuses = config?.completeStatuses || ['dev-complete', 'stage-ready', 'merged'];
+
+    let synced = 0;
+    let conflicts = 0;
+    let removed = 0;
+    let clearedStale = 0;
+    let errors = 0;
+
+    try {
+      // Step 1: Query ALL items from GitHub with their fields (efficient bulk query with pagination)
+      this.logger.info('Syncing all fields from GitHub Projects...');
+      
+      const allItems: any[] = [];
+      let hasNextPage = true;
+      let cursor: string | undefined = undefined;
+      let pageCount = 0;
+
+      // Paginate through all project items
+      while (hasNextPage) {
+        pageCount++;
+        const result = await this.projectAPI.queryItems({ 
+          limit: 100,
+          cursor: cursor
+        });
+
+        allItems.push(...result.items);
+
+        hasNextPage = result.hasNextPage;
+        cursor = result.endCursor;
+
+        if (hasNextPage) {
+          this.logger.info(`  Fetched page ${pageCount} (${allItems.length} items so far)...`);
+        }
+      }
+
+      this.logger.info(`Fetched ${allItems.length} total items from GitHub (${pageCount} page${pageCount > 1 ? 's' : ''})`);
+
+      // NOTE: result.items[].fieldValues is a Record<string, any>, NOT an array
+      // The ProjectsAPI transforms GraphQL's fieldValues.nodes[] into a flat object
+
+      // Build a map of projectItemId → GitHub state
+      const githubStateMap = new Map<string, {
+        status: AssignmentStatus | null;
+        assignedInstance: string | null;
+        issueNumber?: number;
+      }>();
+
+      for (const item of allItems) {
+        let status: AssignmentStatus | null = null;
+        let assignedInstance: string | null = null;
+
+        // Extract fields from fieldValues (it's a Record, not an array)
+        if (item.fieldValues) {
+          // Get status from fieldValues Record and convert from GitHub format to internal enum
+          const statusValue = item.fieldValues['Status'];
+          if (statusValue && typeof statusValue === 'string') {
+            // Convert GitHub status ("In Progress") to internal enum ("in-progress")
+            status = REVERSE_STATUS_MAPPING[statusValue] || null;
+          }
+
+          // Get assigned instance from fieldValues Record
+          const assignedValue = item.fieldValues[assignedInstanceFieldName];
+          if (assignedValue && typeof assignedValue === 'string') {
+            assignedInstance = assignedValue;
+          }
+        }
+
+        githubStateMap.set(item.id, {
+          status,
+          assignedInstance,
+          issueNumber: item.content?.number,
+        });
+      }
+
+      // Step 2: Sync in-memory assignments with GitHub state
+      const assignmentsToRemove: string[] = [];
+
+      for (const assignment of this.assignments) {
+        if (!assignment.projectItemId) {
+          this.logger.warn(`Assignment #${assignment.issueNumber} has no projectItemId, skipping`);
+          continue;
+        }
+
+        const githubState = githubStateMap.get(assignment.projectItemId);
+
+        if (!githubState) {
+          // Assignment exists locally but not in GitHub - orphaned
+          this.logger.warn(`Assignment #${assignment.issueNumber} (${assignment.projectItemId}) not found in GitHub, marking for removal`);
+          assignmentsToRemove.push(assignment.id);
+          removed++;
+          continue;
+        }
+
+        // Check for conflicts
+        let hasConflict = false;
+
+        // Sync status (githubState.status is already converted to AssignmentStatus enum)
+        if (githubState.status !== null && githubState.status !== assignment.status) {
+          this.logger.warn(`Status conflict for #${assignment.issueNumber}: local=${assignment.status}, github=${githubState.status}`);
+          assignment.status = githubState.status;
+          assignment.lastActivity = new Date().toISOString();
+          hasConflict = true;
+          conflicts++;
+        }
+
+        // Sync assigned instance
+        const localHasAssignment = !!assignment.llmInstanceId;
+        const githubHasAssignment = !!githubState.assignedInstance;
+
+        if (localHasAssignment !== githubHasAssignment) {
+          this.logger.warn(`Assigned instance conflict for #${assignment.issueNumber}: local=${localHasAssignment}, github=${githubHasAssignment}`);
+
+          if (!githubHasAssignment) {
+            // GitHub cleared the assignment - remove local
+            this.logger.info(`GitHub cleared assignment for #${assignment.issueNumber}, removing from local`);
+            assignmentsToRemove.push(assignment.id);
+            removed++;
+            continue;
+          }
+          // If GitHub has assignment but local doesn't, that's unusual but we'll keep local state
+          // since it contains process-specific info (worktree, etc)
+          hasConflict = true;
+          conflicts++;
+        }
+
+        if (hasConflict) {
+          this.logger.info(`Synced #${assignment.issueNumber} from GitHub`);
+        }
+
+        synced++;
+      }
+
+      // Remove orphaned assignments
+      for (const assignmentId of assignmentsToRemove) {
+        await this.deleteAssignment(assignmentId);
+      }
+
+      // Step 3: Clear stale assigned instances in GitHub
+      // Items that are in complete/ready statuses but still have assigned instance
+      for (const [projectItemId, githubState] of githubStateMap.entries()) {
+        if (!githubState.status || !githubState.assignedInstance) {
+          continue;
+        }
+
+        const shouldNotHaveAssignment = [
+          ...readyStatuses,
+          ...completeStatuses,
+        ].includes(githubState.status);
+
+        if (shouldNotHaveAssignment) {
+          this.logger.warn(`Clearing stale assigned instance from GitHub for issue #${githubState.issueNumber} (status: ${githubState.status})`);
+          try {
+            if (this.projectAPI.updateAssignedInstance) {
+              await this.projectAPI.updateAssignedInstance(projectItemId, null);
+              clearedStale++;
+            }
+          } catch (error) {
+            this.logger.error(`Failed to clear stale assigned instance: ${error instanceof Error ? error.message : String(error)}`);
+            errors++;
+          }
+        }
+      }
+
+      this.logger.info(
+        `Sync complete: ${synced} synced, ${conflicts} conflicts, ${removed} removed, ${clearedStale} stale cleared, ${errors} errors`
+      );
+
+      return { synced, conflicts, removed, clearedStale, errors };
+    } catch (error) {
+      this.logger.error(`Failed to sync from GitHub: ${error instanceof Error ? error.message : String(error)}`);
+      errors++;
+      return { synced, conflicts, removed, clearedStale, errors };
+    }
   }
 
   /**
    * Check if an issue is already assigned
    */
   isIssueAssigned(issueNumber: number): boolean {
-    if (!this.data) return false;
-    return this.data.assignments.some((a) => a.issueNumber === issueNumber);
+    return this.assignments.some((a) => a.issueNumber === issueNumber);
   }
 
   // ============================================================
@@ -445,16 +568,17 @@ export class AssignmentManager {
     assignmentId: string,
     newStatus: AssignmentStatus
   ): Promise<void> {
-    if (!this.data) {
-      throw new Error('Assignment manager not initialized');
-    }
-
-    const assignment = this.data.assignments.find((a) => a.id === assignmentId);
+    const assignment = this.assignments.find((a) => a.id === assignmentId);
     if (!assignment) {
       throw new Error(`Assignment ${assignmentId} not found`);
     }
 
     const oldStatus = assignment.status;
+
+    // Skip if status hasn't changed
+    if (oldStatus === newStatus) {
+      return;
+    }
 
     // Update local first (local operation is fast and reliable)
     await this.updateAssignment(assignmentId, { status: newStatus });
@@ -502,11 +626,7 @@ export class AssignmentManager {
     assignmentId: string,
     instanceId: string | null
   ): Promise<void> {
-    if (!this.data) {
-      throw new Error('Assignment manager not initialized');
-    }
-
-    const assignment = this.data.assignments.find((a) => a.id === assignmentId);
+    const assignment = this.assignments.find((a) => a.id === assignmentId);
     if (!assignment) {
       throw new Error(`Assignment ${assignmentId} not found`);
     }
@@ -539,11 +659,7 @@ export class AssignmentManager {
    * Fetches from project API if not set
    */
   async ensureProjectItemId(assignmentId: string): Promise<void> {
-    if (!this.data) {
-      throw new Error('Assignment manager not initialized');
-    }
-
-    const assignment = this.data.assignments.find((a) => a.id === assignmentId);
+    const assignment = this.assignments.find((a) => a.id === assignmentId);
     if (!assignment) {
       throw new Error(`Assignment ${assignmentId} not found`);
     }
@@ -565,7 +681,6 @@ export class AssignmentManager {
       const projectItemId = await this.projectAPI.getProjectItemId(assignment.issueNumber);
       if (projectItemId) {
         assignment.projectItemId = projectItemId;
-        await this.save();
         this.logger.info(
           `Linked #${assignment.issueNumber} to project item ${projectItemId}`
         );
@@ -591,10 +706,6 @@ export class AssignmentManager {
     conflicts: number;
     errors: number;
   }> {
-    if (!this.data) {
-      throw new Error('Assignment manager not initialized');
-    }
-
     if (!this.projectAPI) {
       this.logger.warn('No project API configured, skipping reconciliation');
       return { total: 0, conflicts: 0, errors: 0 };
@@ -604,7 +715,7 @@ export class AssignmentManager {
     let conflicts = 0;
     let errors = 0;
 
-    for (const assignment of this.data.assignments) {
+    for (const assignment of this.assignments) {
       total++;
 
       if (!assignment.projectItemId) {

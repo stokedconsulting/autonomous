@@ -70,12 +70,10 @@ export class ProjectFieldMapper {
       return null;
     }
 
-    // Query the full item with field values
-    const result = await this.projectsAPI.queryItems({
-      limit: 100,
-    });
+    // Query ALL items with pagination (not just first 100)
+    const allItems = await this.projectsAPI.getAllItems();
 
-    const item = result.items.find((i) => i.content.number === issueNumber);
+    const item = allItems.find((i) => i.content.number === issueNumber);
 
     if (!item) {
       return null;
@@ -88,13 +86,12 @@ export class ProjectFieldMapper {
    * Get metadata for multiple issues
    */
   async getMetadataForIssues(issueNumbers: number[]): Promise<Map<number, ProjectItemMetadata>> {
-    const result = await this.projectsAPI.queryItems({
-      limit: 100,
-    });
+    // Query ALL items with pagination (not just first 100)
+    const allItems = await this.projectsAPI.getAllItems();
 
     const metadataMap = new Map<number, ProjectItemMetadata>();
 
-    result.items.forEach((item) => {
+    allItems.forEach((item) => {
       if (issueNumbers.includes(item.content.number)) {
         metadataMap.set(item.content.number, this.mapItemToMetadata(item));
       }

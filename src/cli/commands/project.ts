@@ -63,7 +63,7 @@ export async function projectInitCommand(_options: ProjectCommandOptions): Promi
         fields: {
           status: {
             fieldName: 'Status',
-            readyValues: ['Todo', 'Ready', 'Evaluated'],
+            readyValues: ['Todo', 'Ready', 'Evaluated', 'Failed Review'],
             inProgressValue: 'In Progress',
             reviewValue: 'In Review',
             doneValue: 'Done',
@@ -359,30 +359,29 @@ export async function projectBackfillCommand(options: ProjectCommandOptions & { 
     const githubAPI = new GitHubAPI(_githubToken, config.github.owner, config.github.repo);
 
     // Get items with specified status or all items
-    let result;
+    let items;
     if (options.all) {
       console.log(chalk.blue('Fetching ALL items from project...'));
-      result = await projectsAPI.queryItems({ limit: 100 });
+      items = await projectsAPI.getAllItems();
     } else {
       const targetStatus = options.status || 'In Review';
       console.log(chalk.blue(`Fetching items with status: ${targetStatus}...`));
-      result = await projectsAPI.queryItems({
+      items = await projectsAPI.getAllItems({
         status: [targetStatus],
-        limit: 100,
       });
     }
 
-    if (result.items.length === 0) {
+    if (items.length === 0) {
       console.log(chalk.yellow('No items found'));
       return;
     }
 
-    console.log(chalk.blue(`Found ${result.items.length} items. Backfilling metadata...\n`));
+    console.log(chalk.blue(`Found ${items.length} items. Backfilling metadata...\n`));
 
     let syncedCount = 0;
     let errorCount = 0;
 
-    for (const item of result.items) {
+    for (const item of items) {
       const issueNumber = item.content.number;
 
       try {
