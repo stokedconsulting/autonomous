@@ -34,7 +34,7 @@ module.exports = {
   // The pattern handles pnpm's nested node_modules structure
   transformIgnorePatterns: [
     '/node_modules/(?!.pnpm)/',
-    '/node_modules/.pnpm/(?!(ink-testing-library|ink@|cli-truncate|string-width|strip-ansi|ansi-regex|ansi-styles|wrap-ansi|slice-ansi|is-fullwidth-code-point|emoji-regex|chalk@|widest-line|cli-boxes|yoga-wasm-web|scheduler|code-excerpt|stack-utils))',
+    '/node_modules/.pnpm/(?!(ink-testing-library|ink@|cli-truncate|string-width|strip-ansi|ansi-regex|ansi-styles|wrap-ansi|slice-ansi|is-fullwidth-code-point|emoji-regex|chalk@|widest-line|cli-boxes|yoga-wasm-web|scheduler|code-excerpt|stack-utils|zustand))',
   ],
   collectCoverageFrom: [
     'src/**/*.{ts,tsx}',
