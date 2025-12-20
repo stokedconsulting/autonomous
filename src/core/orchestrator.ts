@@ -216,9 +216,7 @@ export class Orchestrator {
           epicName: this.epicConfig.epicName,
           currentPhase: null,
           autoMergeToMain: this.epicConfig.autoMergeToMain,
-        },
-        this.projectsAPI || undefined,
-        this.fieldMapper || undefined
+        }
       );
 
       console.log(chalk.green(`✓ Epic Mode enabled: "${this.epicConfig.epicName}"`));
@@ -320,7 +318,7 @@ export class Orchestrator {
       console.log(chalk.blue('📋 Processing final merges before shutdown...\n'));
       
       try {
-        await this.mergeWorker.processDevCompleteItems(!!this.epicOrchestrator);
+        await this.mergeWorker.processDevCompleteItems();
         console.log(chalk.green('✓ All pending merges completed\n'));
       } catch (error) {
         console.error(chalk.red('⚠️  Error processing final merges:'), error instanceof Error ? error.message : String(error));
@@ -1170,7 +1168,7 @@ export class Orchestrator {
 
         // Process dev-complete items with merge worker
         if (this.mergeWorker) {
-          await this.mergeWorker.processDevCompleteItems(!!this.epicOrchestrator);
+          await this.mergeWorker.processDevCompleteItems();
         }
 
         // Check for dead processes every 3 minutes (3 cycles) and resurrect them
