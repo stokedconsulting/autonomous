@@ -25,3 +25,6 @@ export {
 
 // Command stores
 export * from './stores/index.js';
+
+// Molecules - Shared command UI components
+export * from './molecules/index.js';
