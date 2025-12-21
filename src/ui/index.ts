@@ -28,3 +28,9 @@ export * from './stores/index.js';
 
 // Molecules - Shared command UI components
 export * from './molecules/index.js';
+
+// Organisms - Complex composed UI components
+export * from './organisms/index.js';
+
+// Pages - Full-page UI components
+export * from './pages/index.js';

@@ -30,6 +30,7 @@ import { clarifyCommand } from './commands/clarify.js';
 import { personaCommand } from './commands/persona.js';
 import { updateCommand } from './commands/update.js';
 import { epicCommand } from './commands/epic.js';
+import { configureHelpOverride } from './commands/help.js';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
@@ -287,17 +288,21 @@ program
 // Persona command
 program.addCommand(personaCommand);
 
+// Configure custom help command (overrides Commander's default)
+// This must be done after all commands are registered
+configureHelpOverride(program);
+
 // Handle unknown commands
 program.on('command:*', () => {
   console.error(`\nError: Unknown command '${program.args.join(' ')}'`);
-  console.error(`Run 'autonomous --help' to see available commands\n`);
+  console.error(`Run 'auto help' to see available commands\n`);
   process.exit(1);
 });
 
 // Show help if no command provided
 if (!process.argv.slice(2).length) {
-  program.outputHelp();
-  process.exit(0);
+  // Trigger our custom help command
+  process.argv.push('help');
 }
 
 // Parse arguments
