@@ -64,7 +64,7 @@ const STATUS_MAPPING: Record<AssignmentStatus, string> = {
  * Pre-assignment statuses (Todo, Evaluated) are NOT included
  * because they represent "assignable" issues, not assigned ones.
  */
-const REVERSE_STATUS_MAPPING: Record<string, AssignmentStatus> = {
+export const REVERSE_STATUS_MAPPING: Record<string, AssignmentStatus> = {
   'In Progress': 'in-progress',    // Actively being worked on by LLM
   'In Review': 'in-review',        // PR created, awaiting review
   'Dev Complete': 'dev-complete',  // Dev work done, awaiting merge worker
@@ -573,6 +573,35 @@ export class GitHubProjectsAPI implements ProjectAPI {
       hasNextPage: result.node.items.pageInfo.hasNextPage,
       endCursor: result.node.items.pageInfo.endCursor,
     };
+  }
+
+  /**
+   * Get all project items (with automatic pagination)
+   * Fetches all pages and returns the complete list of items
+   *
+   * @param filters - Optional filters to apply (same as queryItems but without limit/cursor)
+   */
+  async getAllItems(filters?: {
+    status?: string[];
+    includeNoStatus?: boolean;
+  }): Promise<ProjectItem[]> {
+    const allItems: ProjectItem[] = [];
+    let cursor: string | undefined;
+    let hasNextPage = true;
+
+    while (hasNextPage) {
+      const result = await this.queryItems({
+        ...filters,
+        limit: 100,
+        cursor,
+      });
+
+      allItems.push(...result.items);
+      hasNextPage = result.hasNextPage;
+      cursor = result.endCursor;
+    }
+
+    return allItems;
   }
 
   /**

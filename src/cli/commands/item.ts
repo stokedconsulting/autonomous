@@ -122,7 +122,8 @@ export async function itemLogCommand(issueNumber: string, options: ItemOptions =
     // Monitor assignment status for completion
     const statusCheckInterval = setInterval(async () => {
       try {
-        await assignmentManager.load(); // Reload to get latest status
+        // Sync status from GitHub to get latest status
+        await assignmentManager.syncStatusFromGitHub();
         const updatedAssignment = assignmentManager.getAllAssignments().find(a => a.issueNumber === issueNum);
 
         if (updatedAssignment && updatedAssignment.status !== assignment.status) {

@@ -7,13 +7,13 @@ import { AssignmentManager } from './assignment-manager.js';
 import { WorktreeManager } from '../git/worktree-manager.js';
 import { IssueEvaluator } from './issue-evaluator.js';
 import { GitHubAPI } from '../github/api.js';
-import { GitHubProjectsAPI } from '../github/projects-api.js';
+import { GitHubProjectsAPI, ProjectItem } from '../github/projects-api.js';
 import { ProjectFieldMapper } from '../github/project-field-mapper.js';
 // import { ProjectAwarePrioritizer } from './project-aware-prioritizer.js'; // Unused for now
 import { LLMAdapter } from '../llm/adapter.js';
 import { ClaudeAdapter } from '../llm/claude-adapter.js';
 import { PromptBuilder } from '../llm/prompt-builder.js';
-import { LLMProvider, Assignment, Issue, LLMConfig, UpdateAssignmentInput, IssueEvaluation } from '../types/index.js';
+import { LLMProvider, Assignment, Issue, LLMConfig, IssueEvaluation } from '../types/index.js';
 import { getGitHubToken } from '../utils/github-token.js';
 import { resolveProjectId } from '../github/project-resolver.js';
 import { MergeWorker } from './merge-worker.js';
@@ -21,7 +21,7 @@ import { ReviewWorker } from './review-worker.js';
 import { EpicOrchestrator } from './epic-orchestrator.js';
 // import { PhaseConsolidationWorker } from './phase-consolidation-worker.js'; // Temporarily disabled - has compilation errors
 import { promises as fs } from 'fs';
-import { join } from 'path';
+import { join, dirname, basename } from 'path';
 import chalk from 'chalk';
 import { isProcessRunning, isZombieProcess } from '../utils/process.js';
 import { detectSessionCompletion, extractPRNumber } from '../utils/session-analyzer.js';
@@ -182,7 +182,6 @@ export class Orchestrator {
           autoResolveConflicts: config.mergeWorker.autoResolveConflicts ?? true,
           evaluateValue: config.project?.fields.status.evaluateValue, // Pass evaluateValue for rejection workflow
           autoMergeToMain: this.epicConfig?.autoMergeToMain ?? false, // Epic mode: auto-merge to main
-          epicMode: !!this.epicOrchestrator, // Epic mode: only process phase masters
         },
         this.verbose
       );
@@ -262,11 +261,22 @@ export class Orchestrator {
     // First, check for dead processes and resurrect them
     await this.resurrectDeadAssignments();
 
-    // Sync assignment status from GitHub to catch manual status changes
-    if (this.projectsAPI) {
-      console.log(chalk.blue('Syncing assignment status from GitHub Project...'));
+    // Comprehensive sync from GitHub to establish correct state
+    if (this.projectsAPI && this.fieldMapper) {
+      console.log(chalk.blue('Syncing all fields from GitHub Project...'));
       try {
-        await this.assignmentManager.syncStatusFromGitHub();
+        const config = this.configManager.getConfig();
+        const syncResult = await this.assignmentManager.syncAllFieldsFromGitHub({
+          assignedInstanceFieldName: config.project?.fields.assignedInstance?.fieldName || 'Assigned Instance',
+          readyStatuses: config.project?.fields.status.readyValues || ['Ready'],
+          completeStatuses: ['dev-complete', 'stage-ready', 'merged'],
+        });
+
+        if (syncResult.conflicts > 0 || syncResult.removed > 0 || syncResult.clearedStale > 0) {
+          console.log(chalk.yellow(`  ⚠️  Resolved ${syncResult.conflicts} conflicts, removed ${syncResult.removed} orphaned, cleared ${syncResult.clearedStale} stale`));
+        } else {
+          console.log(chalk.green(`  ✓ All assignments in sync (${syncResult.synced} checked)`));
+        }
       } catch (error) {
         console.warn(chalk.yellow('⚠️  Could not sync from GitHub:'), error instanceof Error ? error.message : String(error));
       }
@@ -392,27 +402,27 @@ export class Orchestrator {
           console.log(chalk.gray(`  Filtering by project statuses: ${readyStatuses.join(', ')}`));
         }
 
-        const result = await this.projectsAPI.queryItems({
+        // Use getAllItems() to paginate through ALL ready items, not just first 100
+        const allReadyItems = await this.projectsAPI.getAllItems({
           status: readyStatuses,
-          limit: 100,
           includeNoStatus: true, // Include items with no status set (ready to start)
         });
 
         if (this.verbose) {
-          console.log(chalk.gray(`  Found ${result.items.length} items in project with ready statuses`));
+          console.log(chalk.gray(`  Found ${allReadyItems.length} items in project with ready statuses (paginated)`));
         }
 
         // Filter by epic if epic mode is enabled
-        let epicFilteredItems = result.items;
+        let epicFilteredItems = allReadyItems;
         if (this.epicOrchestrator && this.fieldMapper) {
           // Map result items to ProjectItemWithMetadata
-          const itemsWithMetadata = result.items.map(item => this.fieldMapper!.mapItemWithMetadata(item));
+          const itemsWithMetadata = allReadyItems.map(item => this.fieldMapper!.mapItemWithMetadata(item));
 
           // Filter to only items in the epic
           const epicItems = this.epicOrchestrator.filterEpicItems(itemsWithMetadata);
 
           console.log(chalk.blue(`\n📊 Epic Mode: "${this.epicConfig!.epicName}"`));
-          console.log(chalk.gray(`  Total ready items: ${result.items.length}`));
+          console.log(chalk.gray(`  Total ready items: ${allReadyItems.length}`));
           console.log(chalk.gray(`  Epic items: ${epicItems.length}`));
 
           // Apply phase-based filtering (sequential phase execution)
@@ -423,18 +433,43 @@ export class Orchestrator {
 
           console.log(chalk.gray(`  Phase-assignable items: ${phaseAssignableItems.length}`));
 
-          // Convert back to raw ProjectItems for the availability check loop
-          const epicIssueNumbers = new Set(phaseAssignableItems.map(item => item.issueNumber));
-          epicFilteredItems = result.items.filter(item => epicIssueNumbers.has(item.content.number));
-
           if (phaseAssignableItems.length === 0) {
             console.log(chalk.yellow(`  ⚠️  No assignable items in current phase of epic "${this.epicConfig!.epicName}"`));
             return [];
           }
+
+          // Query the project for the full item data (including field values) for phase assignable items
+          // This is needed because phaseAssignableItems may include items not in the original ready statuses query
+          // Use pagination to fetch all items (100 max per request)
+          const phaseIssueNumbers = new Set(phaseAssignableItems.map(item => item.issueNumber));
+          const allProjectItems: ProjectItem[] = [];
+          let hasNextPage = true;
+          let cursor: string | undefined = undefined;
+
+          while (hasNextPage) {
+            const pageResult = await this.projectsAPI!.queryItems({
+              limit: 100,
+              cursor: cursor,
+            });
+
+            allProjectItems.push(...pageResult.items);
+            hasNextPage = pageResult.hasNextPage;
+            cursor = pageResult.endCursor;
+
+            // Early exit if we found all needed items
+            const foundItems = allProjectItems.filter(item => phaseIssueNumbers.has(item.content.number));
+            if (foundItems.length === phaseIssueNumbers.size) {
+              break;
+            }
+          }
+
+          epicFilteredItems = allProjectItems.filter(item =>
+            phaseIssueNumbers.has(item.content.number)
+          );
         } else if (this.fieldMapper) {
           // Non-epic mode: Filter out phase master items
           // Phase masters have MASTER in title + (Phase N) where N is integer
-          const itemsWithMetadata = result.items.map(item => this.fieldMapper!.mapItemWithMetadata(item));
+          const itemsWithMetadata = allReadyItems.map(item => this.fieldMapper!.mapItemWithMetadata(item));
           const workItems = itemsWithMetadata.filter(item => {
             const title = item.issueTitle;
             const hasMaster = /MASTER/i.test(title);
@@ -442,10 +477,10 @@ export class Orchestrator {
             return !(hasMaster && hasIntegerPhase); // Filter OUT phase masters
           });
           const workItemNumbers = new Set(workItems.map(item => item.issueNumber));
-          epicFilteredItems = result.items.filter(item => workItemNumbers.has(item.content.number));
+          epicFilteredItems = allReadyItems.filter(item => workItemNumbers.has(item.content.number));
 
-          if (this.verbose && workItems.length < result.items.length) {
-            const filteredCount = result.items.length - workItems.length;
+          if (this.verbose && workItems.length < allReadyItems.length) {
+            const filteredCount = allReadyItems.length - workItems.length;
             console.log(chalk.gray(`  Filtered out ${filteredCount} phase master item(s)`));
           }
         }
@@ -629,20 +664,19 @@ export class Orchestrator {
     // Get all items that might be assigned (In Progress, In Review, Evaluated)
     const assignedStatuses = ['In Progress', 'In Review', config.project?.fields.status.evaluateValue || 'Evaluate'];
 
-    const result = await this.projectsAPI.queryItems({
+    const allItems = await this.projectsAPI.getAllItems({
       status: assignedStatuses,
-      limit: 100,
     });
 
-    if (result.items.length === 0) {
+    if (allItems.length === 0) {
       console.log(chalk.gray('  No assigned items found'));
       return;
     }
 
-    console.log(chalk.gray(`  Found ${result.items.length} potentially assigned items`));
+    console.log(chalk.gray(`  Found ${allItems.length} potentially assigned items`));
 
     // Map to metadata and filter to non-epic items
-    const itemsWithMetadata = result.items.map(item => this.fieldMapper!.mapItemWithMetadata(item));
+    const itemsWithMetadata = allItems.map(item => this.fieldMapper!.mapItemWithMetadata(item));
     const epicItems = this.epicOrchestrator.filterEpicItems(itemsWithMetadata);
     const epicIssueNumbers = new Set(epicItems.map(item => item.issueNumber));
 
@@ -914,7 +948,7 @@ export class Orchestrator {
     // Set phase master flag in metadata
     if (isPhaseMaster && assignment.metadata) {
       assignment.metadata.isPhaseMaster = true;
-      await this.assignmentManager.save();
+      // No save needed - in-memory only
     }
 
     // Link assignment to project item if project integration enabled
@@ -992,10 +1026,11 @@ export class Orchestrator {
 
     // Update assignment with PID and status (with project sync if enabled)
     if (this.projectsAPI) {
+      // Update process ID first (don't set status here, updateStatusWithSync will do it)
       await this.assignmentManager.updateAssignment(assignment.id, {
-        status: 'in-progress',
         processId,
       });
+      // Set status and sync to GitHub
       await this.assignmentManager.updateStatusWithSync(assignment.id, 'in-progress');
       // Update "Assigned Instance" field in GitHub Project
       await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, assignment.llmInstanceId);
@@ -1066,7 +1101,7 @@ export class Orchestrator {
     }
 
     // Filter for Phase N.x work items (not the master)
-    const phasePattern = new RegExp(`Phase\\s+${phaseNumber}\\.\\d+`, 'i');
+    const phasePattern = new RegExp(`Phase\s+${phaseNumber}\\.\\d+`, 'i');
     const epicPattern = new RegExp(epicName, 'i');
 
     const phaseWorkItems: Array<{ issueNumber: number; title: string; projectItemId: string }> = [];
@@ -1102,6 +1137,14 @@ export class Orchestrator {
         console.log(chalk.yellow(`  ⚠️  Failed to assign #${workItem.issueNumber}: ${error instanceof Error ? error.message : String(error)}`));
       }
     }
+  }
+
+  /**
+   * Detect if an issue is a phase work item (Phase N.x format)
+   */
+  private isPhaseWorkItem(issueTitle: string): boolean {
+    // Must match "Phase N.x" pattern (decimal indicates work item)
+    return /Phase\s+\d+\.\d+/i.test(issueTitle);
   }
 
   /**
@@ -1142,9 +1185,20 @@ export class Orchestrator {
         githubSyncCycleCount++;
         if (githubSyncCycleCount >= 5) {
           if (this.verbose) {
-            console.log(chalk.gray('\n  🔄 Periodic sync from GitHub...'));
+            console.log(chalk.gray('\n  🔄 Periodic comprehensive sync from GitHub...'));
           }
-          await this.assignmentManager.syncStatusFromGitHub();
+          if (this.projectsAPI && this.fieldMapper) {
+            try {
+              const config = this.configManager.getConfig();
+              await this.assignmentManager.syncAllFieldsFromGitHub({
+                assignedInstanceFieldName: config.project?.fields.assignedInstance?.fieldName || 'Assigned Instance',
+                readyStatuses: config.project?.fields.status.readyValues || ['Ready'],
+                completeStatuses: ['dev-complete', 'stage-ready', 'merged'],
+              });
+            } catch (error) {
+              console.warn(chalk.yellow('⚠️  Periodic sync failed:'), error instanceof Error ? error.message : String(error));
+            }
+          }
           githubSyncCycleCount = 0;
         }
 
@@ -1187,26 +1241,25 @@ export class Orchestrator {
     }
 
     try {
-      // Query items with "Evaluate" status
-      const result = await this.projectsAPI.queryItems({
+      // Query ALL items with "Evaluate" status (not just first 100)
+      const allItems = await this.projectsAPI.getAllItems({
         status: [evaluateStatus],
-        limit: 100,
       });
 
       if (this.verbose) {
-        console.log(chalk.gray(`  Found ${result.items.length} items with "${evaluateStatus}" status`));
+        console.log(chalk.gray(`  Found ${allItems.length} items with "${evaluateStatus}" status`));
       }
 
       // Filter by epic if epic mode is enabled
-      let epicFilteredEvalItems = result.items;
+      let epicFilteredEvalItems = allItems;
       if (this.epicOrchestrator && this.fieldMapper) {
-        const itemsWithMetadata = result.items.map(item => this.fieldMapper!.mapItemWithMetadata(item));
+        const itemsWithMetadata = allItems.map(item => this.fieldMapper!.mapItemWithMetadata(item));
         const epicItems = this.epicOrchestrator.filterEpicItems(itemsWithMetadata);
         const epicIssueNumbers = new Set(epicItems.map(item => item.issueNumber));
-        epicFilteredEvalItems = result.items.filter(item => epicIssueNumbers.has(item.content.number));
+        epicFilteredEvalItems = allItems.filter(item => epicIssueNumbers.has(item.content.number));
 
-        if (this.verbose && epicFilteredEvalItems.length < result.items.length) {
-          console.log(chalk.gray(`  Epic filter: ${epicFilteredEvalItems.length}/${result.items.length} items match epic`));
+        if (this.verbose && epicFilteredEvalItems.length < allItems.length) {
+          console.log(chalk.gray(`  Epic filter: ${epicFilteredEvalItems.length}/${allItems.length} items match epic`));
         }
       }
 
@@ -1340,79 +1393,252 @@ export class Orchestrator {
     try {
       const status = await adapter.getStatus(assignment.llmInstanceId);
 
-      // Check for session file to distinguish between normal completion and crash
-      const sessionFile = join(this.autonomousDataDir, `session-${assignment.llmInstanceId}.json`);
-      let sessionFileExists = false;
-      let prNumber: number | undefined;
-      let prUrl: string | undefined;
-      let summary: string | undefined;
+      // Check if process is actually running
+      if (status.processId && !isProcessRunning(status.processId)) {
+        // Process has exited - check for completion indicators FIRST before treating as dead
+        const logPath = join(this.autonomousDataDir, `output-${assignment.llmInstanceId}.log`);
+        const sessionAnalysis = detectSessionCompletion(logPath);
 
-      interface SessionData {
-        prNumber?: number;
-        prUrl?: string;
-        summary?: string;
-      }
+        // For phase masters, PR creation is a strong completion signal
+        const isPhaseMaster = assignment.metadata?.isPhaseMaster === true;
+        const prNumber = extractPRNumber(logPath);
+        const hasPR = prNumber !== undefined;
 
-      try {
-        const sessionData: SessionData = JSON.parse(await fs.readFile(sessionFile, 'utf-8'));
-        sessionFileExists = true;
-        prNumber = sessionData.prNumber;
-        prUrl = sessionData.prUrl;
-        summary = sessionData.summary || 'Work completed';
-      } catch {
-        // No session file - process may have crashed or still running
-        sessionFileExists = false;
-      }
-
-      // Only mark as complete if:
-      // 1. Process is not running AND
-      // 2. Session file exists (indicating normal completion via hook)
-      if (!status.isRunning && assignment.status === 'in-progress') {
-        if (!sessionFileExists) {
-          // Process died without completing - this should be resurrected, not marked complete
-          if (this.verbose) {
-            console.log(chalk.yellow(`  #${assignment.issueNumber}: Process ended without session file - will be resurrected`));
+        if (sessionAnalysis.isComplete || (isPhaseMaster && hasPR)) {
+          // SUCCESS: Session completed normally
+          console.log(chalk.green(`\n✓ Session completed successfully for issue #${assignment.issueNumber}`));
+          console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
+          if (isPhaseMaster && hasPR) {
+            console.log(chalk.gray(`   Phase master with PR #${prNumber} created`));
           }
-          return;
-        }
+          if (sessionAnalysis.isComplete) {
+            console.log(chalk.gray(`   Found completion indicators: ${sessionAnalysis.indicators.slice(0, 3).join(', ')}`));
+          }
 
-        // Normal completion - session file exists
-        this.logEvent('✅', `Dev Complete: #${assignment.issueNumber}`, prUrl || summary || 'Dev work completed');
-        summary = summary || 'Dev work completed';
-
-        // Update assignment to dev-complete (awaiting merge worker)
-        const updates: UpdateAssignmentInput = {
-          completedAt: new Date().toISOString(),
-        };
-
-        if (prNumber) updates.prNumber = prNumber;
-        if (prUrl) updates.prUrl = prUrl;
-
-        // Update with GitHub sync if available
-        if (this.projectsAPI) {
-          await this.assignmentManager.updateStatusWithSync(assignment.id, 'dev-complete');
-          await this.assignmentManager.updateAssignment(assignment.id, updates);
-
-          // Clear assigned instance since LLM work is complete
-          await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
-
-          // Add labels based on Work Type and changes
-          await this.addCompletionLabels(assignment.issueNumber, assignment.projectItemId, prNumber);
-        } else {
+          // Update assignment status to dev-complete
           await this.assignmentManager.updateAssignment(assignment.id, {
-            ...updates,
             status: 'dev-complete',
+            completedAt: new Date().toISOString(),
           });
-        }
 
-        // Add final work session
-        await this.assignmentManager.addWorkSession(assignment.id, {
-          endedAt: new Date().toISOString(),
-          summary,
-        });
+          // Update GitHub project status and clear assigned instance
+          if (this.projectsAPI) {
+            try {
+              if (!assignment.projectItemId) {
+                throw new Error('No projectItemId on assignment');
+              }
+              
+              const devCompleteStatus = 'Dev Complete';
+              await this.projectsAPI.updateItemStatusByValue(
+                assignment.projectItemId,
+                devCompleteStatus
+              );
+              console.log(chalk.green(`   ✓ Updated GitHub project status to "Dev Complete"`));
 
-        if (prUrl) {
-          console.log(chalk.blue(`   PR created: ${prUrl}`));
+              // Clear assigned instance since work is complete
+              await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
+            } catch (error) {
+              if (this.verbose) {
+                console.log(chalk.yellow(`   ⚠️  Could not update project status: ${error}`));
+              }
+            }
+          }
+
+          // Add final work session
+          await this.assignmentManager.addWorkSession(assignment.id, {
+            endedAt: new Date().toISOString(),
+            summary: 'Work completed',
+          });
+
+          if (prNumber) {
+            console.log(chalk.blue(`   PR created: ${prNumber}`));
+          }
+        } else {
+          // Before resurrecting, run AI review to check if work is actually complete
+          console.log(chalk.blue(`   Running AI review to assess completion status...`));
+
+          if (this.reviewWorker && this.githubAPI) {
+            try {
+              const reviewResult = await this.reviewWorker.reviewByIssueNumber(assignment.issueNumber, {
+                branch: assignment.branchName,
+                quiet: true,
+                useCurrentDirectory: false,
+              });
+
+              if (reviewResult && reviewResult.passed) {
+                // Work is actually complete!
+                console.log(chalk.green(`   ✓ AI Review: Work is complete!`));
+
+                // Check if this is a phase work item (should NOT go to dev-complete)
+                const isPhaseWorkItem = !!this.epicOrchestrator && this.isPhaseWorkItem(assignment.issueTitle);
+
+                if (isPhaseWorkItem) {
+                  // Phase work item: Keep as in-progress but clear assigned instance
+                  console.log(chalk.blue(`   Phase work item - keeping status as In Progress`));
+
+                  if (this.projectsAPI) {
+                    await this.assignmentManager.updateStatusWithSync(assignment.id, 'in-progress');
+                    await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
+                  } else {
+                    await this.assignmentManager.updateAssignment(assignment.id, {
+                      completedAt: new Date().toISOString(),
+                    });
+                  }
+
+                  console.log(chalk.green(`   ✓ Phase work item complete (awaiting phase master merge)`));
+                } else {
+                  // Normal mode OR phase master: Mark as dev-complete
+                  console.log(chalk.green(`   Marking as Dev Complete`));
+
+                  await this.assignmentManager.updateAssignment(assignment.id, {
+                    status: 'dev-complete',
+                    completedAt: new Date().toISOString(),
+                  });
+
+                  // Update GitHub project status
+                  if (this.projectsAPI && this.fieldMapper) {
+                    try {
+                      const projectMetadata = await this.fieldMapper.getMetadataForIssues([assignment.issueNumber]);
+                      const metadata = projectMetadata.get(assignment.issueNumber);
+                      if (metadata?.projectItemId) {
+                        await this.projectsAPI.updateItemStatusByValue(
+                          metadata.projectItemId,
+                          'Dev Complete'
+                        );
+                        console.log(chalk.green(`   ✓ Updated GitHub project status to "Dev Complete"`));
+
+                        // Clear assigned instance since work is complete
+                        await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
+                      }
+                    } catch (error) {
+                      if (this.verbose) {
+                        console.log(chalk.yellow(`   ⚠️  Could not update project status: ${error}`));
+                      }
+                    }
+                  }
+                }
+
+                // Add final work session
+                await this.assignmentManager.addWorkSession(assignment.id, {
+                  endedAt: new Date().toISOString(),
+                  summary: 'Work completed',
+                });
+
+                if (prNumber) {
+                  console.log(chalk.blue(`   📋 PR #${prNumber} created`));
+                }
+              } else if (reviewResult && !reviewResult.passed) {
+                // Work is incomplete - document what's left and resurrect
+                const failureReasons = reviewResult.reviewResult.failureReasons || [];
+                const remainingWork = failureReasons.join('\n- ');
+
+                console.log(chalk.yellow(`   ⚠️  AI Review: Work incomplete`));
+                console.log(chalk.gray(`   Remaining work:\n   - ${remainingWork}`));
+
+                // Post comment to GitHub documenting resurrection state
+                if (this.githubAPI) {
+                  try {
+                    const comment = `## 🔄 Process Resurrected
+
+**Status:** Work in progress detected after process termination
+
+**AI Review Findings:**
+${failureReasons.map(r => `- ${r}`).join('\n')}
+
+**Next Steps:**
+The autonomous system is resuming work on this issue. The LLM will address the remaining items identified above.
+
+---
+*Automated resurrection at ${new Date().toISOString()}*`;
+
+                    await this.githubAPI.createComment(assignment.issueNumber, comment);
+                    console.log(chalk.gray(`   ✓ Posted resurrection status to GitHub issue`));
+                  } catch (error) {
+                    if (this.verbose) {
+                      console.log(chalk.yellow(`   ⚠️  Could not post comment: ${error}`));
+                    }
+                  }
+                }
+              }
+            } catch (error) {
+              // Review failed - proceed with resurrection anyway
+              console.log(chalk.yellow(`   ⚠️  Review failed, proceeding with resurrection`));
+              if (this.verbose) {
+                console.log(chalk.gray(`   Error: ${error instanceof Error ? error.message : String(error)}`));
+              }
+            }
+          }
+
+          console.log(chalk.blue(`   Resurrecting process...`));
+
+          // Generate continuation prompt
+          const prompt = PromptBuilder.buildContinuationPrompt({
+            assignment,
+            worktreePath: assignment.worktreePath,
+            lastSummary: assignment.workSessions.length > 0
+              ? assignment.workSessions[assignment.workSessions.length - 1].summary
+              : undefined,
+          });
+
+          // Restart the LLM instance
+          const newInstanceId = await adapter.start({
+            assignment,
+            prompt,
+            workingDirectory: assignment.worktreePath,
+          });
+
+          // Update assignment with new instance ID and process ID
+          const newStatus = await adapter.getStatus(newInstanceId);
+          assignment.llmInstanceId = newInstanceId;
+          assignment.processId = newStatus.processId || undefined;
+
+          await this.assignmentManager.updateAssignment(assignment.id, {
+            lastActivity: new Date().toISOString(),
+            processId: newStatus.processId,
+          });
+
+          // Update "Assigned Instance" field in project to new instance ID
+          if (this.projectsAPI && this.fieldMapper) {
+            try {
+              const projectMetadata = await this.fieldMapper.getMetadataForIssues([assignment.issueNumber]);
+              const metadata = projectMetadata.get(assignment.issueNumber);
+              if (metadata?.projectItemId) {
+                const assignedInstanceField = this.configManager.getConfig().project?.fields.assignedInstance;
+                if (assignedInstanceField) {
+                  await this.projectsAPI.updateItemTextField(
+                    metadata.projectItemId,
+                    assignedInstanceField.fieldName,
+                    newInstanceId
+                  );
+                }
+              }
+            } catch (error) {
+              console.log(chalk.yellow(`   ⚠️  Could not update Assigned Instance field in project`));
+            }
+          }
+
+          // Add a new work session for the resurrection
+          await this.assignmentManager.addWorkSession(assignment.id, {
+            startedAt: new Date().toISOString(),
+            promptUsed: prompt,
+            summary: 'Process resurrected after unexpected termination',
+          });
+
+          console.log(chalk.green(`✓ Process resurrected with new instance: ${newInstanceId}`));
+
+          // Wait 5 seconds for process to stabilize and start properly
+          console.log(chalk.gray('   Waiting for process to stabilize...'));
+          await new Promise(resolve => setTimeout(resolve, 5000));
+
+          // Verify the process is actually running after stabilization period
+          if (newStatus.processId && !isProcessRunning(newStatus.processId)) {
+            console.log(chalk.yellow(`   ⚠️  Warning: Resurrected process ${newStatus.processId} is not running after 5s`));
+            console.log(chalk.gray('   The process may need more time or failed to start properly'));
+          } else if (this.verbose) {
+            console.log(chalk.green('   ✓ Process verified running'));
+          }
+
+          // PTY mode handles real-time output directly (no log monitoring needed)
         }
       }
     } catch (error) {
@@ -1444,10 +1670,101 @@ export class Orchestrator {
       }
     }
 
+    // SECOND: Check for orphaned GitHub assignments (items with assigned instances but no local assignment)
+    // This handles the case where assignments.json was cleared but GitHub still has In Progress items
+    if (this.projectsAPI && this.fieldMapper) {
+      console.log(chalk.blue('Checking for orphaned GitHub assignments...'));
+      
+      try {
+        const config = this.configManager.getConfig();
+        const assignedInstanceFieldName = config.project?.fields.assignedInstance?.fieldName || 'Assigned Instance';
+        
+        // Query GitHub for ALL In Progress items (not just first 100)
+        const allItems = await this.projectsAPI.getAllItems({
+          status: ['In Progress'],
+        });
+
+        let orphanedCount = 0;
+
+        for (const item of allItems) {
+          // Check if item has an assigned instance
+          const assignedInstance = item.fieldValues?.[assignedInstanceFieldName];
+          
+          if (!assignedInstance || typeof assignedInstance !== 'string') {
+            continue; // No assigned instance, skip
+          }
+
+          const issueNumber = item.content?.number;
+          if (!issueNumber) {
+            continue;
+          }
+
+          // Check if we have a local assignment for this issue
+          const existingAssignment = this.assignmentManager.getAssignmentByIssue(issueNumber);
+          
+          if (!existingAssignment) {
+            // Orphaned assignment! GitHub has it but we don't
+            console.log(chalk.yellow(`\n⚠️  Orphaned assignment detected: #${issueNumber}`));
+            console.log(chalk.gray(`   GitHub has assigned instance: ${assignedInstance}`));
+            console.log(chalk.gray(`   But no local assignment found - recreating...`));
+
+            // Get issue details to recreate assignment
+            if (!this.githubAPI) {
+              console.error(chalk.red(`   Failed to recreate: GitHub API not available`));
+              continue;
+            }
+
+            try {
+              const issue = await this.githubAPI.getIssue(issueNumber);
+              
+              // Determine worktree path
+              const projectName = basename(this.projectPath);
+              const worktreePath = join(dirname(this.projectPath), `${projectName}-issue-${issueNumber}`);
+              
+              // Create assignment with basic info
+              const newAssignment = await this.assignmentManager.createAssignment({
+                issueNumber: issue.number,
+                issueTitle: issue.title,
+                llmProvider: 'claude', // TODO: detect from assignedInstance format
+                worktreePath,
+                branchName: `issue-${issueNumber}`,
+              });
+
+              // Update with GitHub-specific fields
+              await this.assignmentManager.updateAssignment(newAssignment.id, {
+                llmInstanceId: assignedInstance,
+                status: 'in-progress',
+              });
+
+              // Also set projectItemId directly on the assignment object
+              newAssignment.projectItemId = item.id;
+              // No save needed - in-memory only
+
+              console.log(chalk.green(`   ✓ Recreated local assignment: ${newAssignment.id}`));
+              orphanedCount++;
+            } catch (error) {
+              console.error(chalk.red(`   Failed to recreate assignment: ${error instanceof Error ? error.message : String(error)}`));
+            }
+          }
+        }
+
+        if (orphanedCount > 0) {
+          console.log(chalk.green(`\n✓ Recreated ${orphanedCount} orphaned assignment(s)\n`));
+        } else if (this.verbose) {
+          console.log(chalk.gray('  No orphaned assignments found'));
+        }
+      } catch (error) {
+        console.warn(chalk.yellow('⚠️  Could not check for orphaned assignments:'), error instanceof Error ? error.message : String(error));
+      }
+    }
+
     // NOW get in-progress assignments (statuses are accurate after sync)
     const inProgressAssignments = this.assignmentManager.getAssignmentsByStatus('in-progress');
 
     if (inProgressAssignments.length === 0) {
+      if (this.verbose) {
+        console.log(chalk.gray('No in-progress assignments to check'));
+      }
       return;
     }
 
@@ -1455,7 +1772,9 @@ export class Orchestrator {
 
     let resurrected = 0;
     let skippedDueToCompletion = 0;
+    let cleaned = 0;
     const resurrectedThisCycle = new Set<string>(); // Track what we've already resurrected this cycle
+    const failedToResurrect: Assignment[] = []; // Track assignments that can't be resurrected
 
     for (const assignment of inProgressAssignments) {
       // Skip if we already resurrected this assignment in this cycle
@@ -1468,7 +1787,8 @@ export class Orchestrator {
 
       const adapter = this.adapters.get(assignment.llmProvider);
       if (!adapter) {
-        console.warn(chalk.yellow(`No adapter found for ${assignment.llmProvider}, skipping resurrection`));
+        console.warn(chalk.yellow(`No adapter found for ${assignment.llmProvider}, marking for cleanup`));
+        failedToResurrect.push(assignment);
         continue;
       }
 
@@ -1477,17 +1797,7 @@ export class Orchestrator {
 
         // Check if process is actually running FIRST (process check is more reliable than session file)
         if (status.processId && !isProcessRunning(status.processId)) {
-          console.log(chalk.yellow(`\n⚠️  Dead process detected for issue #${assignment.issueNumber}`));
-          console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
-          console.log(chalk.gray(`   Process ID: ${status.processId} (not running)`));
-
-          // Check if process is a zombie (defunct)
-          const isZombie = isZombieProcess(status.processId);
-          if (isZombie) {
-            console.log(chalk.gray(`   Process is a zombie (defunct) - checking for completion signals`));
-          }
-
-          // Check session log for completion indicators before resurrecting
+          // Process has exited - check for completion indicators FIRST before treating as dead
           const logPath = join(this.autonomousDataDir, `output-${assignment.llmInstanceId}.log`);
           const sessionAnalysis = detectSessionCompletion(logPath);
 
@@ -1497,7 +1807,9 @@ export class Orchestrator {
           const hasPR = prNumber !== undefined;
 
           if (sessionAnalysis.isComplete || (isPhaseMaster && hasPR)) {
-            console.log(chalk.green(`   ✓ Session completed successfully - not resurrecting`));
+            // SUCCESS: Session completed normally, not a dead process
+            console.log(chalk.green(`\n✓ Session completed successfully for issue #${assignment.issueNumber}`));
+            console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
             if (isPhaseMaster && hasPR) {
               console.log(chalk.gray(`   Phase master with PR #${prNumber} created`));
             }
@@ -1512,26 +1824,21 @@ export class Orchestrator {
             });
 
             // Update GitHub project status and clear assigned instance
-            if (this.projectsAPI && this.fieldMapper) {
+            if (this.projectsAPI) {
               try {
-                const projectMetadata = await this.fieldMapper.getMetadataForIssues([assignment.issueNumber]);
-                const metadata = projectMetadata.get(assignment.issueNumber);
-                if (metadata?.projectItemId) {
-                  const devCompleteStatus = 'Dev Complete'; // This should match your project's status value
-                  await this.projectsAPI.updateItemStatusByValue(
-                    metadata.projectItemId,
-                    devCompleteStatus
-                  );
-                  console.log(chalk.green(`   ✓ Updated GitHub project status to "Dev Complete"`));
-
-                  // Clear assigned instance since work is complete
-                  await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, '');
-                  console.log(chalk.gray(`   ✓ Cleared assigned instance`));
-
-                  if (prNumber) {
-                    console.log(chalk.blue(`   📋 PR #${prNumber} created`));
-                  }
+                if (!assignment.projectItemId) {
+                  throw new Error('No projectItemId on assignment');
                 }
+                
+                const devCompleteStatus = 'Dev Complete';
+                await this.projectsAPI.updateItemStatusByValue(
+                  assignment.projectItemId,
+                  devCompleteStatus
+                );
+                console.log(chalk.green(`   ✓ Updated GitHub project status to "Dev Complete"`));
+
+                // Clear assigned instance since work is complete
+                await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
               } catch (error) {
                 if (this.verbose) {
                   console.log(chalk.yellow(`   ⚠️  Could not update project status: ${error}`));
@@ -1541,6 +1848,17 @@ export class Orchestrator {
 
             skippedDueToCompletion++;
             continue;
+          } else {
+            // Process exited but work is NOT complete - this is a dead process
+            console.log(chalk.yellow(`\n⚠️  Dead process detected for issue #${assignment.issueNumber}`));
+            console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
+            console.log(chalk.gray(`   Process ID: ${status.processId} (not running)`));
+
+            // Check if process is a zombie (defunct)
+            const isZombie = isZombieProcess(status.processId);
+            if (isZombie) {
+              console.log(chalk.gray(`   Process is a zombie (defunct) - will attempt resurrection`));
+            }
           }
 
           // Before resurrecting, run AI review to check if work is actually complete
@@ -1555,35 +1873,67 @@ export class Orchestrator {
               });
 
               if (reviewResult && reviewResult.passed) {
-                // Work is actually complete! Mark as dev-complete instead of resurrecting
-                console.log(chalk.green(`   ✓ AI Review: Work is complete! Marking as Dev Complete`));
+                // Work is actually complete!
+                console.log(chalk.green(`   ✓ AI Review: Work is complete!`));
 
-                await this.assignmentManager.updateAssignment(assignment.id, {
-                  status: 'dev-complete',
-                  completedAt: new Date().toISOString(),
-                });
+                // Check if this is a phase work item (should NOT go to dev-complete)
+                const isPhaseWorkItem = !!this.epicOrchestrator && this.isPhaseWorkItem(assignment.issueTitle);
 
-                // Update GitHub project status
-                if (this.projectsAPI && this.fieldMapper) {
-                  try {
-                    const projectMetadata = await this.fieldMapper.getMetadataForIssues([assignment.issueNumber]);
-                    const metadata = projectMetadata.get(assignment.issueNumber);
-                    if (metadata?.projectItemId) {
-                      await this.projectsAPI.updateItemStatusByValue(
-                        metadata.projectItemId,
-                        'Dev Complete'
-                      );
-                      console.log(chalk.green(`   ✓ Updated GitHub project status to "Dev Complete"`));
-                    }
-                  } catch (error) {
-                    if (this.verbose) {
-                      console.log(chalk.yellow(`   ⚠️  Could not update project status: ${error}`));
+                if (isPhaseWorkItem) {
+                  // Phase work item: Keep as in-progress but clear assigned instance
+                  console.log(chalk.blue(`   Phase work item - keeping status as In Progress`));
+
+                  if (this.projectsAPI) {
+                    await this.assignmentManager.updateStatusWithSync(assignment.id, 'in-progress');
+                    await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
+                  } else {
+                    await this.assignmentManager.updateAssignment(assignment.id, {
+                      completedAt: new Date().toISOString(),
+                    });
+                  }
+
+                  console.log(chalk.green(`   ✓ Phase work item complete (awaiting phase master merge)`));
+                } else {
+                  // Normal mode OR phase master: Mark as dev-complete
+                  console.log(chalk.green(`   Marking as Dev Complete`));
+
+                  await this.assignmentManager.updateAssignment(assignment.id, {
+                    status: 'dev-complete',
+                    completedAt: new Date().toISOString(),
+                  });
+
+                  // Update GitHub project status
+                  if (this.projectsAPI && this.fieldMapper) {
+                    try {
+                      const projectMetadata = await this.fieldMapper.getMetadataForIssues([assignment.issueNumber]);
+                      const metadata = projectMetadata.get(assignment.issueNumber);
+                      if (metadata?.projectItemId) {
+                        await this.projectsAPI.updateItemStatusByValue(
+                          metadata.projectItemId,
+                          'Dev Complete'
+                        );
+                        console.log(chalk.green(`   ✓ Updated GitHub project status to "Dev Complete"`));
+
+                        // Clear assigned instance since work is complete
+                        await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
+                      }
+                    } catch (error) {
+                      if (this.verbose) {
+                        console.log(chalk.yellow(`   ⚠️  Could not update project status: ${error}`));
+                      }
                     }
                   }
                 }
 
-                skippedDueToCompletion++;
-                continue;
+                // Add final work session
+                await this.assignmentManager.addWorkSession(assignment.id, {
+                  endedAt: new Date().toISOString(),
+                  summary: 'Work completed',
+                });
+
+                if (prNumber) {
+                  console.log(chalk.blue(`   📋 PR #${prNumber} created`));
+                }
               } else if (reviewResult && !reviewResult.passed) {
                 // Work is incomplete - document what's left and resurrect
                 const failureReasons = reviewResult.reviewResult.failureReasons || [];
@@ -1691,9 +2041,10 @@ The autonomous system is resuming work on this issue. The LLM will address the r
           console.log(chalk.gray('   Waiting for process to stabilize...'));
           await new Promise(resolve => setTimeout(resolve, 5000));
 
-          // Verify the process is actually running after stabilization period
-          if (newStatus.processId && !isProcessRunning(newStatus.processId)) {
-            console.log(chalk.yellow(`   ⚠️  Warning: Resurrected process ${newStatus.processId} is not running after 5s`));
+          // Get updated status after wait
+          const updatedStatus = await adapter.getStatus(newInstanceId);
+          if (updatedStatus.processId && !isProcessRunning(updatedStatus.processId)) {
+            console.log(chalk.yellow(`   ⚠️  Warning: Started process ${updatedStatus.processId} is not running after 5s`));
             console.log(chalk.gray('   The process may need more time or failed to start properly'));
           } else if (this.verbose) {
             console.log(chalk.green('   ✓ Process verified running'));
@@ -1763,11 +2114,49 @@ The autonomous system is resuming work on this issue. The LLM will address the r
           chalk.red(`Failed to resurrect assignment for issue #${assignment.issueNumber}:`),
           error instanceof Error ? error.message : String(error)
         );
-        // Continue with other assignments
+        failedToResurrect.push(assignment);
       }
     }
 
-    if (resurrected > 0 || skippedDueToCompletion > 0) {
+    // Clean up assignments that couldn't be resurrected
+    if (failedToResurrect.length > 0 && this.projectsAPI) {
+      console.log(chalk.yellow(`\n⚠️  Cleaning up ${failedToResurrect.length} failed assignment(s)...`));
+
+      const config = this.configManager.getConfig();
+      const readyStatus = config.project?.fields.status.readyValues?.[0] || 'Ready';
+
+      for (const assignment of failedToResurrect) {
+        try {
+          console.log(chalk.gray(`   Cleaning up #${assignment.issueNumber}`));
+
+          // Set status back to Ready in GitHub
+          if (assignment.projectItemId) {
+            await this.projectsAPI.updateItemStatusByValue(assignment.projectItemId, readyStatus);
+            console.log(chalk.gray(`      ✓ Status set to "${readyStatus}"`));
+
+            // Clear assigned instance in GitHub
+            if (this.projectsAPI.updateAssignedInstance) {
+              await this.projectsAPI.updateAssignedInstance(assignment.projectItemId, null);
+              console.log(chalk.gray(`      ✓ Assigned instance cleared`));
+            }
+          }
+
+          // Delete local assignment
+          await this.assignmentManager.deleteAssignment(assignment.id);
+          console.log(chalk.gray(`      ✓ Removed from local assignments`));
+
+          cleaned++;
+        } catch (error) {
+          console.error(chalk.red(`   Failed to clean up #${assignment.issueNumber}:`), error instanceof Error ? error.message : String(error));
+        }
+      }
+
+      if (cleaned > 0) {
+        console.log(chalk.green(`\n✓ Cleaned up ${cleaned} orphaned assignment(s)`));
+      }
+    }
+
+    if (resurrected > 0 || skippedDueToCompletion > 0 || cleaned > 0) {
       if (resurrected > 0) {
         console.log(chalk.green(`\n✓ Resurrected ${resurrected} process(es)`));
       }
@@ -1835,7 +2224,9 @@ The autonomous system is resuming work on this issue. The LLM will address the r
 
   /**
    * Add labels to issue based on Work Type and changes made
+   * TODO: Currently unused - was part of old completion flow. Can be re-enabled if needed.
    */
+  // @ts-expect-error - Unused but kept for future use
   private async addCompletionLabels(
     issueNumber: number,
     projectItemId: string | undefined,
