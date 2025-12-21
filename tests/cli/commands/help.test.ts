@@ -338,6 +338,49 @@ describe('help command', () => {
         expect(output).toContain('push');
       });
     });
+
+    describe('parent command matching', () => {
+      const categoriesWithSubcommands = [
+        {
+          name: 'project',
+          label: 'Project Management',
+          commands: [
+            { name: 'project init', description: 'Initialize project' },
+            { name: 'project status', description: 'Show project status' },
+            { name: 'project sync', description: 'Sync project data' },
+          ],
+        },
+        {
+          name: 'config',
+          label: 'Configuration',
+          commands: [
+            { name: 'config init', description: 'Initialize config' },
+            { name: 'config show', description: 'Show config' },
+          ],
+        },
+      ];
+
+      it('should show subcommands when parent command is specified', () => {
+        const output = generateTextHelp(categoriesWithSubcommands, 'project');
+        expect(output).toContain('Command Group: project');
+        expect(output).toContain('Subcommands:');
+        expect(output).toContain('init');
+        expect(output).toContain('status');
+        expect(output).toContain('sync');
+      });
+
+      it('should show help hint for parent command', () => {
+        const output = generateTextHelp(categoriesWithSubcommands, 'project');
+        expect(output).toContain('auto help project <subcommand>');
+      });
+
+      it('should work with different parent commands', () => {
+        const output = generateTextHelp(categoriesWithSubcommands, 'config');
+        expect(output).toContain('Command Group: config');
+        expect(output).toContain('init');
+        expect(output).toContain('show');
+      });
+    });
   });
 
   describe('createHelpCommand', () => {

@@ -274,6 +274,7 @@ export function generateTextHelp(
 
   // If focusing on a specific command, show only that
   if (focusCommand) {
+    // First, try to find an exact match or alias match
     for (const category of categories) {
       const cmd = category.commands.find(
         (c) =>
@@ -324,6 +325,35 @@ export function generateTextHelp(
         return lines.join('\n');
       }
     }
+
+    // Check if focusCommand is a parent command (e.g., "project", "config", "item")
+    // by looking for subcommands that start with it
+    const matchingCommands: { cmd: CommandInfo; categoryLabel: string }[] = [];
+    for (const category of categories) {
+      for (const cmd of category.commands) {
+        if (cmd.name.startsWith(`${focusCommand} `)) {
+          matchingCommands.push({ cmd, categoryLabel: category.label });
+        }
+      }
+    }
+
+    if (matchingCommands.length > 0) {
+      lines.push(`Command Group: ${focusCommand}`);
+      lines.push('');
+      lines.push('Subcommands:');
+      lines.push('─'.repeat(60));
+      for (const { cmd } of matchingCommands) {
+        const subCmdName = cmd.name.replace(`${focusCommand} `, '');
+        lines.push(`  ${subCmdName}`);
+        lines.push(`      ${cmd.description}`);
+      }
+      lines.push('');
+      lines.push('─'.repeat(60));
+      lines.push(`Use "auto help ${focusCommand} <subcommand>" for more information.`);
+      lines.push('');
+      return lines.join('\n');
+    }
+
     // Command not found
     lines.push(`Command '${focusCommand}' not found.`);
     lines.push('');
@@ -385,12 +415,14 @@ export function shouldUseInteractiveHelp(options: {
 
 /**
  * Find the category that contains a specific command
+ * Also handles parent commands (e.g., "project" matches "project init", etc.)
  */
 function findCommandCategory(
   categories: CommandCategory[],
   commandName: string
 ): string | undefined {
   for (const category of categories) {
+    // Check for exact match, last segment match, or alias match
     const found = category.commands.find(
       (c) =>
         c.name === commandName ||
@@ -398,6 +430,14 @@ function findCommandCategory(
         c.aliases?.includes(commandName)
     );
     if (found) {
+      return category.name;
+    }
+
+    // Check if commandName is a parent command prefix
+    const hasSubcommand = category.commands.some((c) =>
+      c.name.startsWith(`${commandName} `)
+    );
+    if (hasSubcommand) {
       return category.name;
     }
   }
