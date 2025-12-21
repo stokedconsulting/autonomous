@@ -43,3 +43,14 @@ export {
   warningResult,
   infoResult,
 } from './ResultSummary.js';
+
+// Dependency Check Item - Dependency status indicator with spinner
+export {
+  DependencyCheckItem,
+  type DependencyCheckItemProps,
+  type DependencyStatus,
+  checkingDependency,
+  passedDependency,
+  failedDependency,
+  warnDependency,
+} from './DependencyCheckItem.js';
