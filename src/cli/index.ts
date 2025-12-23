@@ -112,6 +112,16 @@ config
   .action(configCommand.addLLM);
 
 config
+  .command('use-llm <provider>')
+  .description('Enable one LLM provider and disable the others')
+  .option('--cli-path <path>', 'Path to LLM CLI executable')
+  .option('--cli-args <args>', 'Additional CLI arguments (e.g., "--yolo")')
+  .option('--api-key <key>', 'API key for the LLM')
+  .option('--max-concurrent <number>', 'Maximum concurrent issues', parseInt)
+  .option('--enable-hooks', 'Enable hooks support')
+  .action(configCommand.useLLM);
+
+config
   .command('show')
   .description('Show current configuration')
   .option('-j, --json', 'Output as JSON')
@@ -135,6 +145,7 @@ program
   .command('assign <issue-number>')
   .description('Manually assign a specific issue to autonomous processing')
   .option('--skip-eval', 'Skip issue evaluation step')
+  .option('-p, --provider <provider>', 'LLM provider to use (claude, gemini, codex)')
   .option('-v, --verbose', 'Enable verbose output')
   .action(assignCommand);
 
@@ -236,11 +247,12 @@ project
   .command('start <project-name>')
   .description('Start autonomous work on a project (picks first ready item, or use --item)')
   .option('--item <number>', 'Work on a specific item number', parseInt)
-  .option('--dry-run', 'Preview what would happen without starting Claude')
+  .option('--dry-run', 'Preview what would happen without starting the LLM')
   .option('--review', 'Create project from description first, review plan, then start (use with description instead of project-name)')
   .option('-v, --verbose', 'Interactive UI with full issue titles and navigation')
   .option('-i, --interactive', 'Same as --verbose: interactive UI mode')
   .option('-p, --max-parallel <number>', 'Max parallel evaluations (default: 3)', parseInt)
+  .option('--provider <provider>', 'LLM provider to use (claude, gemini, codex)')
   .action(projectStartCommand);
 
 project

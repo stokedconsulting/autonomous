@@ -7,7 +7,7 @@ import { promises as fs } from 'fs';
 import { join } from 'path';
 import { ConfigManager } from '../../core/config-manager.js';
 import { AssignmentManager } from '../../core/assignment-manager.js';
-import { ClaudeAdapter } from '../../llm/claude-adapter.js';
+import { LLMFactory } from '../../llm/llm-factory.js';
 import { $ } from 'zx';
 import * as readline from 'readline';
 
@@ -78,15 +78,15 @@ export async function unassignCommand(issueNumber: string, options: UnassignOpti
       }
     }
 
-    // Step 1: Stop Claude instance if running
+    // Step 1: Stop LLM instance if running
     if (assignment.status === 'in-progress' && assignment.llmInstanceId) {
-      console.log(chalk.blue('\n🛑 Stopping Claude instance...'));
+      console.log(chalk.blue('\n🛑 Stopping LLM instance...'));
       try {
         const autonomousDataDir = join(cwd, '.autonomous');
-        const claudeConfig = configManager.getLLMConfig(assignment.llmProvider);
-        const claudeAdapter = new ClaudeAdapter(claudeConfig, autonomousDataDir);
-        await claudeAdapter.stop(assignment.llmInstanceId);
-        console.log(chalk.green('  ✓ Claude instance stopped'));
+        const config = configManager.getConfig();
+        const llmAdapter = LLMFactory.create([assignment.llmProvider], config.llms, autonomousDataDir, false);
+        await llmAdapter.stop(assignment.llmInstanceId);
+        console.log(chalk.green('  ✓ LLM instance stopped'));
       } catch (error: unknown) {
         console.warn(chalk.yellow(`  ⚠️  Could not stop instance: ${error instanceof Error ? error.message : String(error)}`));
       }
@@ -151,6 +151,7 @@ export async function unassignCommand(issueNumber: string, options: UnassignOpti
     // Clean up log files
     console.log(chalk.blue('\n🧹 Cleaning up log files...'));
     const autonomousDataDir = join(cwd, '.autonomous');
+    const logsDir = join(autonomousDataDir, 'logs');
     const filesToClean = [
       `output-${assignment.llmInstanceId}.log`,
       `instance-${assignment.llmInstanceId}.json`,
@@ -159,6 +160,12 @@ export async function unassignCommand(issueNumber: string, options: UnassignOpti
       `session-${assignment.llmInstanceId}.json`,
       `activity-${assignment.llmInstanceId}.log`,
     ];
+
+    try {
+      await fs.unlink(join(logsDir, `output-${assignment.llmInstanceId}.log`));
+    } catch {
+      // Ignore if file doesn't exist
+    }
 
     for (const file of filesToClean) {
       try {

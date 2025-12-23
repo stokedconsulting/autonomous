@@ -14,6 +14,7 @@ export interface PrintExecutorOptions {
   logFile: string;
   instanceId: string;
   claudePath?: string;
+  claudeArgs?: string[];
 }
 
 export class ClaudePrintExecutor {
@@ -25,7 +26,7 @@ export class ClaudePrintExecutor {
    * Uses stdin piping to handle long prompts that exceed command-line limits
    */
   async start(options: PrintExecutorOptions): Promise<number> {
-    const { promptText, workingDirectory, logFile, instanceId, claudePath = 'claude' } = options;
+    const { promptText, workingDirectory, logFile, instanceId, claudePath = 'claude', claudeArgs } = options;
 
     return new Promise((resolve, reject) => {
       // Create log file stream
@@ -38,8 +39,15 @@ export class ClaudePrintExecutor {
       // Prepare environment - exclude API key to force desktop mode
       const { ANTHROPIC_API_KEY, ...cleanEnv } = process.env;
 
+      const baseArgs = claudeArgs && claudeArgs.length > 0
+        ? claudeArgs
+        : ['--dangerously-skip-permissions'];
+      const printArgs = baseArgs.includes('--print')
+        ? baseArgs
+        : ['--print', ...baseArgs];
+
       // Spawn Claude with --print flag, prompt will be piped via stdin
-      this.child = spawn(claudePath, ['--print', '--dangerously-skip-permissions'], {
+      this.child = spawn(claudePath, printArgs, {
         cwd: workingDirectory,
         env: {
           ...cleanEnv,

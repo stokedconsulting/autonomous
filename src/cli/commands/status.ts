@@ -157,9 +157,12 @@ function displayAssignment(assignment: Assignment): void {
 
   // Show log file location for in-progress assignments
   if (assignment.status === 'in-progress' && assignment.llmInstanceId) {
-    const logFile = join(process.cwd(), '.autonomous', `output-${assignment.llmInstanceId}.log`);
-    if (existsSync(logFile)) {
-      console.log(`   ${chalk.gray('Log:')} tail -f ${logFile}`);
+    const logsDir = join(process.cwd(), '.autonomous', 'logs');
+    const logFile = join(logsDir, `output-${assignment.llmInstanceId}.log`);
+    const legacyLogFile = join(process.cwd(), '.autonomous', `output-${assignment.llmInstanceId}.log`);
+    const resolvedLogFile = existsSync(logFile) ? logFile : legacyLogFile;
+    if (existsSync(resolvedLogFile)) {
+      console.log(`   ${chalk.gray('Log:')} tail -f ${resolvedLogFile}`);
     } else {
       console.log(`   ${chalk.yellow('Log:')} ${logFile} ${chalk.gray('(not yet created)')}`);
     }

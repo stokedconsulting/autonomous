@@ -21,10 +21,13 @@ import { GitHubProjectsAPI, ProjectItem } from '../../github/projects-api.js';
 import { ProjectDiscovery, DiscoveredProject } from '../../github/project-discovery.js';
 import { getGitHubToken } from '../../utils/github-token.js';
 import { WorktreeManager } from '../../git/worktree-manager.js';
-import { ClaudeAdapter } from '../../llm/claude-adapter.js';
+import { LLMAdapter } from '../../llm/adapter.js';
+import { LLMFactory } from '../../llm/llm-factory.js';
 import { PromptBuilder } from '../../llm/prompt-builder.js';
 import { InstanceManager } from '../../core/instance-manager.js';
 import { detectSessionCompletion, extractPRNumber, detectAutonomousSignals } from '../../utils/session-analyzer.js';
+import { resolveLLMProvider } from '../../utils/llm-provider.js';
+import { LLMProvider } from '../../types/assignments.js';
 import { basename, join } from 'path';
 import { promises as fs } from 'fs';
 
@@ -33,6 +36,7 @@ export interface ProjectStartAppProps {
   verbose?: boolean;
   maxParallel?: number;  // Max concurrent evaluations (default: 3)
   dryRun?: boolean;
+  provider?: string;
 }
 
 interface WorkItem {
@@ -131,6 +135,7 @@ export function ProjectStartApp({
   verbose = false,
   maxParallel = 3,
   dryRun = false,
+  provider,
 }: ProjectStartAppProps): React.ReactElement {
   const { exit } = useApp();
 
@@ -151,7 +156,8 @@ export function ProjectStartApp({
     projectsAPI: GitHubProjectsAPI;
     assignmentManager: AssignmentManager;
     instanceManager: InstanceManager;
-    claudeAdapter: ClaudeAdapter;
+    llmAdapter: LLMAdapter;
+    llmProvider: LLMProvider;
     configManager: ConfigManager;
   } | null>(null);
 
@@ -357,11 +363,11 @@ export function ProjectStartApp({
         };
         const instanceManager = new InstanceManager(assignmentManager, maxSlots);
 
-        // Initialize Claude adapter
+        // Select provider and initialize adapter
         const autonomousDataDir = join(cwd, '.autonomous');
         await fs.mkdir(autonomousDataDir, { recursive: true });
-        const claudeConfig = configManager.getLLMConfig('claude');
-        const claudeAdapter = new ClaudeAdapter(claudeConfig, autonomousDataDir, verbose);
+        const llmProvider = resolveLLMProvider(config, provider);
+        const llmAdapter = LLMFactory.create([llmProvider], config.llms, autonomousDataDir, verbose);
 
         // Get items ready for work
         const readyStatuses = config.project?.fields?.status?.readyValues || ['Todo', 'Ready', 'Evaluated'];
@@ -407,7 +413,8 @@ export function ProjectStartApp({
           projectsAPI,
           assignmentManager,
           instanceManager,
-          claudeAdapter,
+          llmAdapter,
+          llmProvider,
           configManager,
         });
 
@@ -419,7 +426,7 @@ export function ProjectStartApp({
     }
 
     initialize();
-  }, [projectIdentifier, verbose]);
+  }, [projectIdentifier, verbose, provider]);
 
   // Start autonomous work
   const startWork = useCallback(async () => {
@@ -432,7 +439,7 @@ export function ProjectStartApp({
 
     setPhase('working');
 
-    const { githubAPI, projectsAPI, assignmentManager, instanceManager, claudeAdapter, configManager } = services;
+    const { githubAPI, projectsAPI, assignmentManager, instanceManager, llmAdapter, llmProvider, configManager } = services;
     const config = configManager.getConfig();
     const cwd = process.cwd();
     const projectName = basename(cwd);
@@ -468,9 +475,9 @@ export function ProjectStartApp({
         const issue = await githubAPI.getIssue(item.issueNumber);
 
         // Get available slot
-        const slot = instanceManager.getNextAvailableSlot('claude');
+        const slot = instanceManager.getNextAvailableSlot(llmProvider);
         if (!slot) {
-          throw new Error('No available Claude slots');
+          throw new Error(`No available ${llmProvider} slots`);
         }
 
         // Create assignment
@@ -478,7 +485,7 @@ export function ProjectStartApp({
           issueNumber: item.issueNumber,
           issueTitle: issue.title,
           issueBody: issue.body || undefined,
-          llmProvider: 'claude',
+          llmProvider,
           worktreePath,
           branchName,
           requiresTests: config.requirements.testingRequired,
@@ -497,13 +504,13 @@ export function ProjectStartApp({
         // Update status to working (throttled)
         updateItem(item.issueNumber, { status: 'working' as const, progress: 'Working...' });
 
-        // Generate prompt and start Claude
+        // Generate prompt and start LLM
         const prompt = PromptBuilder.buildInitialPrompt({
           assignment,
           worktreePath,
         });
 
-        await claudeAdapter.start({
+        await llmAdapter.start({
           assignment,
           prompt,
           workingDirectory: worktreePath,
@@ -520,75 +527,83 @@ export function ProjectStartApp({
         while (!completed) {
           await new Promise(resolve => setTimeout(resolve, 3000));
 
-          const status = await claudeAdapter.getStatus(slot.instanceId);
-          if (!status.isRunning) {
-            // Check for completion signals
-            const signals = detectAutonomousSignals(logPath);
-            const sessionAnalysis = detectSessionCompletion(logPath);
-            const prNumber = extractPRNumber(logPath);
+          const status = await llmAdapter.getStatus(slot.instanceId);
+          const signals = detectAutonomousSignals(logPath);
+          const sessionAnalysis = detectSessionCompletion(logPath);
+          const prNumber = extractPRNumber(logPath);
+          const shouldAnalyze = !status.isRunning || (!llmAdapter.supportsHooks() && signals.hasSignal);
 
-            if (signals.isComplete || sessionAnalysis.isComplete) {
-              // Success!
-              completed = true;
-              updateItem(item.issueNumber, {
-                status: 'completed' as const,
-                prNumber: signals.prNumber || prNumber,
-                progress: undefined,
-              });
-              flushItemUpdates(); // Immediate update for completion
+          if (!shouldAnalyze) {
+            continue;
+          }
 
-              await assignmentManager.updateAssignment(assignment.id, {
-                status: 'dev-complete',
-                completedAt: new Date().toISOString(),
+          try {
+            await llmAdapter.stop(slot.instanceId);
+          } catch {
+            // Ignore stop failures for already-exited processes
+          }
+
+          if (signals.isComplete || sessionAnalysis.isComplete) {
+            // Success!
+            completed = true;
+            updateItem(item.issueNumber, {
+              status: 'completed' as const,
+              prNumber: signals.prNumber || prNumber,
+              progress: undefined,
+            });
+            flushItemUpdates(); // Immediate update for completion
+
+            await assignmentManager.updateAssignment(assignment.id, {
+              status: 'dev-complete',
+              completedAt: new Date().toISOString(),
+            });
+
+            if (item.projectItemId) {
+              await projectsAPI.updateItemStatusByValue(item.projectItemId, 'Dev Complete');
+              await assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
+            }
+          } else if (signals.isBlocked) {
+            // Blocked
+            completed = true;
+            updateItem(item.issueNumber, {
+              status: 'blocked' as const,
+              errorMessage: signals.blockedReason,
+              progress: undefined,
+            });
+            flushItemUpdates(); // Immediate update for terminal state
+          } else if (signals.isFailed) {
+            // Failed
+            completed = true;
+            updateItem(item.issueNumber, {
+              status: 'failed' as const,
+              errorMessage: signals.failedReason,
+              progress: undefined,
+            });
+            flushItemUpdates(); // Immediate update for terminal state
+          } else {
+            // Process exited without completion - try to resurrect once
+            updateItem(item.issueNumber, { progress: 'Resuming...' });
+
+            try {
+              const continuePrompt = PromptBuilder.buildContinuationPrompt({
+                assignment,
+                worktreePath,
               });
 
-              if (item.projectItemId) {
-                await projectsAPI.updateItemStatusByValue(item.projectItemId, 'Dev Complete');
-                await assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
-              }
-            } else if (signals.isBlocked) {
-              // Blocked
-              completed = true;
-              updateItem(item.issueNumber, {
-                status: 'blocked' as const,
-                errorMessage: signals.blockedReason,
-                progress: undefined,
+              await llmAdapter.start({
+                assignment,
+                prompt: continuePrompt,
+                workingDirectory: worktreePath,
               });
-              flushItemUpdates(); // Immediate update for terminal state
-            } else if (signals.isFailed) {
-              // Failed
+            } catch {
+              // Give up
               completed = true;
               updateItem(item.issueNumber, {
                 status: 'failed' as const,
-                errorMessage: signals.failedReason,
+                errorMessage: 'Process exited without completion',
                 progress: undefined,
               });
               flushItemUpdates(); // Immediate update for terminal state
-            } else {
-              // Process exited without completion - try to resurrect once
-              updateItem(item.issueNumber, { progress: 'Resuming...' });
-
-              try {
-                const continuePrompt = PromptBuilder.buildContinuationPrompt({
-                  assignment,
-                  worktreePath,
-                });
-
-                await claudeAdapter.start({
-                  assignment,
-                  prompt: continuePrompt,
-                  workingDirectory: worktreePath,
-                });
-              } catch {
-                // Give up
-                completed = true;
-                updateItem(item.issueNumber, {
-                  status: 'failed' as const,
-                  errorMessage: 'Process exited without completion',
-                  progress: undefined,
-                });
-                flushItemUpdates(); // Immediate update for terminal state
-              }
             }
           }
         }

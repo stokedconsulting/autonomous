@@ -17,6 +17,7 @@ export interface PTYExecutorOptions {
   instanceId: string;
   onData?: (data: string) => void;
   claudePath?: string;
+  claudeArgs?: string[];
   cols?: number;
   rows?: number;
 }
@@ -38,6 +39,7 @@ export class ClaudePTYExecutor extends EventEmitter {
       instanceId,
       onData,
       claudePath = 'claude',
+      claudeArgs,
       cols = process.stdout.columns || 120,
       rows = process.stdout.rows || 40,
     } = options;
@@ -52,7 +54,11 @@ export class ClaudePTYExecutor extends EventEmitter {
     // Also remove CI flag which could disable interactive terminal features
     const { ANTHROPIC_API_KEY, CI, ...cleanEnv } = process.env;
     
-    this.ptyProcess = pty.spawn(claudePath, ['--dangerously-skip-permissions'], {
+    const args = claudeArgs && claudeArgs.length > 0
+      ? claudeArgs
+      : ['--dangerously-skip-permissions'];
+
+    this.ptyProcess = pty.spawn(claudePath, args, {
       name: 'xterm-256color',
       cols,
       rows,

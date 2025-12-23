@@ -11,16 +11,19 @@ import { IssueEvaluator } from '../../core/issue-evaluator.js';
 import { GitHubAPI } from '../../github/api.js';
 import { GitHubProjectsAPI } from '../../github/projects-api.js';
 import { PromptBuilder } from '../../llm/prompt-builder.js';
-import { ClaudeAdapter } from '../../llm/claude-adapter.js';
+import { LLMFactory } from '../../llm/llm-factory.js';
 import { getGitHubToken } from '../../utils/github-token.js';
 import { resolveProjectIdOrExit } from '../../github/project-resolver.js';
 import { InstanceManager } from '../../core/instance-manager.js';
+import { resolveLLMProvider } from '../../utils/llm-provider.js';
+import { LLMProvider } from '../../types/assignments.js';
 import { join } from 'path';
 import { promises as fs } from 'fs';
 
 interface AssignOptions {
   skipEval?: boolean;
   verbose?: boolean;
+  provider?: string;
 }
 
 export async function assignCommand(issueNumber: string, options: AssignOptions): Promise<void> {
@@ -146,12 +149,19 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
 
     // Get next available instance slot
     console.log(chalk.blue('\n🔍 Finding available instance slot...'));
-    const availableSlot = instanceManager.getNextAvailableSlot('claude');
+    let llmProvider: LLMProvider;
+    try {
+      llmProvider = resolveLLMProvider(config, options.provider);
+    } catch (error) {
+      console.error(chalk.red(`Error selecting provider: ${error instanceof Error ? error.message : String(error)}`));
+      process.exit(1);
+    }
+    const availableSlot = instanceManager.getNextAvailableSlot(llmProvider);
 
     if (!availableSlot) {
       console.error(
         chalk.red(
-          `✗ No available Claude instances (max: ${config.llms.claude.maxConcurrentIssues})`
+          `✗ No available ${llmProvider} instances (max: ${config.llms[llmProvider].maxConcurrentIssues})`
         )
       );
       console.log(chalk.yellow('Try increasing maxConcurrentIssues in .autonomous-config.json'));
@@ -172,7 +182,7 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
       issueNumber: issueNum,
       issueTitle: issue.title,
       issueBody: issue.body || undefined,
-      llmProvider: 'claude', // Default to Claude
+      llmProvider,
       worktreePath,
       branchName,
       requiresTests: config.requirements.testingRequired,
@@ -210,16 +220,16 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
       worktreePath,
     });
 
-    // Start Claude instance
-    console.log(chalk.blue('\n🤖 Starting Claude instance...'));
+    // Start LLM instance
+    console.log(chalk.blue('\n🤖 Starting LLM instance...'));
 
     const autonomousDataDir = join(cwd, '.autonomous');
     await fs.mkdir(autonomousDataDir, { recursive: true });
 
-    const claudeConfig = configManager.getLLMConfig('claude');
-    const claudeAdapter = new ClaudeAdapter(claudeConfig, autonomousDataDir);
+    
+    const llmAdapter = LLMFactory.create([llmProvider], config.llms, autonomousDataDir, options.verbose || false);
 
-    await claudeAdapter.start({
+    await llmAdapter.start({
       assignment,
       prompt,
       workingDirectory: worktreePath,
@@ -246,7 +256,7 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
     console.log(chalk.gray(`Instance ID: ${assignment.llmInstanceId}`));
 
     // Show log file location
-    const logFile = join(autonomousDataDir, `output-${assignment.llmInstanceId}.log`);
+    const logFile = join(autonomousDataDir, 'logs', `output-${assignment.llmInstanceId}.log`);
     console.log(chalk.blue(`\n📊 Monitor progress:`));
     console.log(chalk.gray(`  tail -f ${logFile}`));
     console.log(chalk.gray(`  auto status`));

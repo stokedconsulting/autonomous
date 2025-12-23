@@ -11,16 +11,17 @@ import { GitHubProjectsAPI, ProjectItem } from '../github/projects-api.js';
 import { ProjectFieldMapper } from '../github/project-field-mapper.js';
 // import { ProjectAwarePrioritizer } from './project-aware-prioritizer.js'; // Unused for now
 import { LLMAdapter } from '../llm/adapter.js';
-import { ClaudeAdapter } from '../llm/claude-adapter.js';
+
+import { LLMFactory } from '../llm/llm-factory.js';
 import { PromptBuilder } from '../llm/prompt-builder.js';
-import { LLMProvider, Assignment, Issue, LLMConfig, IssueEvaluation } from '../types/index.js';
+import { LLMProvider, Assignment, Issue, IssueEvaluation } from '../types/index.js';
 import { getGitHubToken } from '../utils/github-token.js';
 import { resolveProjectId } from '../github/project-resolver.js';
 import { MergeWorker } from './merge-worker.js';
 import { ReviewWorker } from './review-worker.js';
 import { EpicOrchestrator } from './epic-orchestrator.js';
 // import { PhaseConsolidationWorker } from './phase-consolidation-worker.js'; // Temporarily disabled - has compilation errors
-import { promises as fs } from 'fs';
+import { promises as fs, existsSync } from 'fs';
 import { join, dirname, basename } from 'path';
 import chalk from 'chalk';
 import { isProcessRunning, isZombieProcess } from '../utils/process.js';
@@ -87,6 +88,14 @@ export class Orchestrator {
     }
   }
 
+  private getLogPath(instanceId: string): string {
+    const logPath = join(this.autonomousDataDir, 'logs', `output-${instanceId}.log`);
+    if (existsSync(logPath)) {
+      return logPath;
+    }
+    return join(this.autonomousDataDir, `output-${instanceId}.log`);
+  }
+
   /**
    * Handle config changes
    */
@@ -151,7 +160,7 @@ export class Orchestrator {
 
     for (const provider of enabledLLMs) {
       const llmConfig = this.configManager.getLLMConfig(provider);
-      const adapter = this.createAdapter(provider, llmConfig);
+      const adapter = this.createAdapter(provider);
 
       // Check if LLM is installed
       const isInstalled = await adapter.isInstalled();
@@ -1395,212 +1404,226 @@ export class Orchestrator {
     try {
       const status = await adapter.getStatus(assignment.llmInstanceId);
 
-      // Check if process is actually running
-      if (status.processId && !isProcessRunning(status.processId)) {
-        // Process has exited - check for completion signals and indicators
-        const logPath = join(this.autonomousDataDir, `output-${assignment.llmInstanceId}.log`);
+      const logPath = this.getLogPath(assignment.llmInstanceId);
+      const autonomousSignals = detectAutonomousSignals(logPath);
+      const processRunning = status.processId ? isProcessRunning(status.processId) : false;
+      const shouldAnalyze =
+        !processRunning ||
+        !status.isRunning ||
+        (!adapter.supportsHooks() && autonomousSignals.hasSignal);
 
-        // PRIMARY: Check for explicit autonomous signals (most reliable)
-        const autonomousSignals = detectAutonomousSignals(logPath);
+      if (!shouldAnalyze) {
+        return;
+      }
 
-        // SECONDARY: Pattern-based session analysis (fallback)
-        const sessionAnalysis = detectSessionCompletion(logPath);
+      if (processRunning && (!status.isRunning || autonomousSignals.hasSignal)) {
+        try {
+          await adapter.stop(assignment.llmInstanceId);
+        } catch (error) {
+          if (this.verbose) {
+            console.log(chalk.yellow(`   ⚠️  Could not stop process: ${error instanceof Error ? error.message : String(error)}`));
+          }
+        }
+      }
 
-        // For phase masters, PR creation is a strong completion signal
-        const isPhaseMaster = assignment.metadata?.isPhaseMaster === true;
-        const prNumber = autonomousSignals.prNumber || extractPRNumber(logPath);
-        const hasPR = prNumber !== undefined;
+      // SECONDARY: Pattern-based session analysis (fallback)
+      const sessionAnalysis = detectSessionCompletion(logPath);
 
-        // Handle explicit BLOCKED signal - needs human intervention
-        if (autonomousSignals.isBlocked) {
-          console.log(chalk.yellow(`\n⏸️  Session blocked for issue #${assignment.issueNumber}`));
-          console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
-          console.log(chalk.gray(`   Reason: ${autonomousSignals.blockedReason || 'No reason provided'}`));
+      // For phase masters, PR creation is a strong completion signal
+      const isPhaseMaster = assignment.metadata?.isPhaseMaster === true;
+      const prNumber = autonomousSignals.prNumber || extractPRNumber(logPath);
+      const hasPR = prNumber !== undefined;
 
-          // Post comment to GitHub about blocked status
-          if (this.githubAPI) {
-            try {
-              await this.githubAPI.createComment(assignment.issueNumber,
-                `## ⏸️ Autonomous Work Blocked\n\n**Reason:** ${autonomousSignals.blockedReason || 'Needs human clarification'}\n\nPlease provide additional context or guidance in the issue comments, then change status back to "In Progress" to resume.`
-              );
-            } catch (error) {
-              if (this.verbose) {
-                console.log(chalk.yellow(`   ⚠️  Could not post comment: ${error}`));
-              }
+      // Handle explicit BLOCKED signal - needs human intervention
+      if (autonomousSignals.isBlocked) {
+        console.log(chalk.yellow(`\n⏸️  Session blocked for issue #${assignment.issueNumber}`));
+        console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
+        console.log(chalk.gray(`   Reason: ${autonomousSignals.blockedReason || 'No reason provided'}`));
+
+        // Post comment to GitHub about blocked status
+        if (this.githubAPI) {
+          try {
+            await this.githubAPI.createComment(assignment.issueNumber,
+              `## ⏸️ Autonomous Work Blocked\n\n**Reason:** ${autonomousSignals.blockedReason || 'Needs human clarification'}\n\nPlease provide additional context or guidance in the issue comments, then change status back to "In Progress" to resume.`
+            );
+          } catch (error) {
+            if (this.verbose) {
+              console.log(chalk.yellow(`   ⚠️  Could not post comment: ${error}`));
             }
           }
-
-          // Update to a blocked status (keep as in-progress but clear instance)
-          await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
-          return; // Don't resurrect
         }
 
-        // Handle explicit FAILED signal - work couldn't be completed
-        if (autonomousSignals.isFailed) {
-          console.log(chalk.red(`\n❌ Session failed for issue #${assignment.issueNumber}`));
-          console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
-          console.log(chalk.gray(`   Reason: ${autonomousSignals.failedReason || 'No reason provided'}`));
+        // Update to a blocked status (keep as in-progress but clear instance)
+        await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
+        return; // Don't resurrect
+      }
 
-          // Post comment to GitHub about failure
-          if (this.githubAPI) {
-            try {
-              await this.githubAPI.createComment(assignment.issueNumber,
-                `## ❌ Autonomous Work Failed\n\n**Reason:** ${autonomousSignals.failedReason || 'Unrecoverable error'}\n\nManual intervention may be required.`
-              );
-            } catch (error) {
-              if (this.verbose) {
-                console.log(chalk.yellow(`   ⚠️  Could not post comment: ${error}`));
-              }
+      // Handle explicit FAILED signal - work couldn't be completed
+      if (autonomousSignals.isFailed) {
+        console.log(chalk.red(`\n❌ Session failed for issue #${assignment.issueNumber}`));
+        console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
+        console.log(chalk.gray(`   Reason: ${autonomousSignals.failedReason || 'No reason provided'}`));
+
+        // Post comment to GitHub about failure
+        if (this.githubAPI) {
+          try {
+            await this.githubAPI.createComment(assignment.issueNumber,
+              `## ❌ Autonomous Work Failed\n\n**Reason:** ${autonomousSignals.failedReason || 'Unrecoverable error'}\n\nManual intervention may be required.`
+            );
+          } catch (error) {
+            if (this.verbose) {
+              console.log(chalk.yellow(`   ⚠️  Could not post comment: ${error}`));
             }
           }
-
-          // Clear instance but don't resurrect
-          await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
-          return; // Don't resurrect
         }
 
-        // Check for completion: explicit signal OR pattern matching OR (phase master + PR)
-        const isComplete = autonomousSignals.isComplete ||
-          sessionAnalysis.isComplete ||
-          (isPhaseMaster && hasPR);
+        // Clear instance but don't resurrect
+        await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
+        return; // Don't resurrect
+      }
 
-        if (isComplete) {
-          // SUCCESS: Session completed normally
-          console.log(chalk.green(`\n✓ Session completed successfully for issue #${assignment.issueNumber}`));
-          console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
+      // Check for completion: explicit signal OR pattern matching OR (phase master + PR)
+      const isComplete = autonomousSignals.isComplete ||
+        sessionAnalysis.isComplete ||
+        (isPhaseMaster && hasPR);
 
-          if (autonomousSignals.isComplete) {
-            console.log(chalk.gray(`   Detection: Explicit AUTONOMOUS_SIGNAL:COMPLETE`));
-          } else if (isPhaseMaster && hasPR) {
-            console.log(chalk.gray(`   Detection: Phase master with PR #${prNumber} created`));
-          } else if (sessionAnalysis.isComplete) {
-            console.log(chalk.gray(`   Detection: Pattern matching (${sessionAnalysis.indicators.slice(0, 3).join(', ')})`));
-          }
+      if (isComplete) {
+        // SUCCESS: Session completed normally
+        console.log(chalk.green(`\n✓ Session completed successfully for issue #${assignment.issueNumber}`));
+        console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
 
-          // Update assignment status to dev-complete
-          await this.assignmentManager.updateAssignment(assignment.id, {
-            status: 'dev-complete',
-            completedAt: new Date().toISOString(),
-          });
+        if (autonomousSignals.isComplete) {
+          console.log(chalk.gray(`   Detection: Explicit AUTONOMOUS_SIGNAL:COMPLETE`));
+        } else if (isPhaseMaster && hasPR) {
+          console.log(chalk.gray(`   Detection: Phase master with PR #${prNumber} created`));
+        } else if (sessionAnalysis.isComplete) {
+          console.log(chalk.gray(`   Detection: Pattern matching (${sessionAnalysis.indicators.slice(0, 3).join(', ')})`));
+        }
 
-          // Update GitHub project status and clear assigned instance
-          if (this.projectsAPI) {
-            try {
-              if (!assignment.projectItemId) {
-                throw new Error('No projectItemId on assignment');
-              }
+        // Update assignment status to dev-complete
+        await this.assignmentManager.updateAssignment(assignment.id, {
+          status: 'dev-complete',
+          completedAt: new Date().toISOString(),
+        });
 
-              const devCompleteStatus = 'Dev Complete';
-              await this.projectsAPI.updateItemStatusByValue(
-                assignment.projectItemId,
-                devCompleteStatus
-              );
-              console.log(chalk.green(`   ✓ Updated GitHub project status to "Dev Complete"`));
+        // Update GitHub project status and clear assigned instance
+        if (this.projectsAPI) {
+          try {
+            if (!assignment.projectItemId) {
+              throw new Error('No projectItemId on assignment');
+            }
 
-              // Clear assigned instance since work is complete
-              await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
-            } catch (error) {
-              if (this.verbose) {
-                console.log(chalk.yellow(`   ⚠️  Could not update project status: ${error}`));
-              }
+            const devCompleteStatus = 'Dev Complete';
+            await this.projectsAPI.updateItemStatusByValue(
+              assignment.projectItemId,
+              devCompleteStatus
+            );
+            console.log(chalk.green(`   ✓ Updated GitHub project status to "Dev Complete"`));
+
+            // Clear assigned instance since work is complete
+            await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
+          } catch (error) {
+            if (this.verbose) {
+              console.log(chalk.yellow(`   ⚠️  Could not update project status: ${error}`));
             }
           }
+        }
 
-          // Add final work session
-          await this.assignmentManager.addWorkSession(assignment.id, {
-            endedAt: new Date().toISOString(),
-            summary: 'Work completed',
-          });
+        // Add final work session
+        await this.assignmentManager.addWorkSession(assignment.id, {
+          endedAt: new Date().toISOString(),
+          summary: 'Work completed',
+        });
 
-          if (prNumber) {
-            console.log(chalk.blue(`   PR created: #${prNumber}`));
-          }
-        } else {
-          // Before resurrecting, run AI review to check if work is actually complete
-          console.log(chalk.blue(`   Running AI review to assess completion status...`));
+        if (prNumber) {
+          console.log(chalk.blue(`   PR created: #${prNumber}`));
+        }
+      } else {
+        // Before resurrecting, run AI review to check if work is actually complete
+        console.log(chalk.blue(`   Running AI review to assess completion status...`));
 
-          if (this.reviewWorker && this.githubAPI) {
-            try {
-              const reviewResult = await this.reviewWorker.reviewByIssueNumber(assignment.issueNumber, {
-                branch: assignment.branchName,
-                quiet: true,
-                useCurrentDirectory: false,
-              });
+        if (this.reviewWorker && this.githubAPI) {
+          try {
+            const reviewResult = await this.reviewWorker.reviewByIssueNumber(assignment.issueNumber, {
+              branch: assignment.branchName,
+              quiet: true,
+              useCurrentDirectory: false,
+            });
 
-              if (reviewResult && reviewResult.passed) {
-                // Work is actually complete!
-                console.log(chalk.green(`   ✓ AI Review: Work is complete!`));
+            if (reviewResult && reviewResult.passed) {
+              // Work is actually complete!
+              console.log(chalk.green(`   ✓ AI Review: Work is complete!`));
 
-                // Check if this is a phase work item (should NOT go to dev-complete)
-                const isPhaseWorkItem = !!this.epicOrchestrator && this.isPhaseWorkItem(assignment.issueTitle);
+              // Check if this is a phase work item (should NOT go to dev-complete)
+              const isPhaseWorkItem = !!this.epicOrchestrator && this.isPhaseWorkItem(assignment.issueTitle);
 
-                if (isPhaseWorkItem) {
-                  // Phase work item: Keep as in-progress but clear assigned instance
-                  console.log(chalk.blue(`   Phase work item - keeping status as In Progress`));
+              if (isPhaseWorkItem) {
+                // Phase work item: Keep as in-progress but clear assigned instance
+                console.log(chalk.blue(`   Phase work item - keeping status as In Progress`));
 
-                  if (this.projectsAPI) {
-                    await this.assignmentManager.updateStatusWithSync(assignment.id, 'in-progress');
-                    await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
-                  } else {
-                    await this.assignmentManager.updateAssignment(assignment.id, {
-                      completedAt: new Date().toISOString(),
-                    });
-                  }
-
-                  console.log(chalk.green(`   ✓ Phase work item complete (awaiting phase master merge)`));
+                if (this.projectsAPI) {
+                  await this.assignmentManager.updateStatusWithSync(assignment.id, 'in-progress');
+                  await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
                 } else {
-                  // Normal mode OR phase master: Mark as dev-complete
-                  console.log(chalk.green(`   Marking as Dev Complete`));
-
                   await this.assignmentManager.updateAssignment(assignment.id, {
-                    status: 'dev-complete',
                     completedAt: new Date().toISOString(),
                   });
+                }
 
-                  // Update GitHub project status
-                  if (this.projectsAPI && this.fieldMapper) {
-                    try {
-                      const projectMetadata = await this.fieldMapper.getMetadataForIssues([assignment.issueNumber]);
-                      const metadata = projectMetadata.get(assignment.issueNumber);
-                      if (metadata?.projectItemId) {
-                        await this.projectsAPI.updateItemStatusByValue(
-                          metadata.projectItemId,
-                          'Dev Complete'
-                        );
-                        console.log(chalk.green(`   ✓ Updated GitHub project status to "Dev Complete"`));
+                console.log(chalk.green(`   ✓ Phase work item complete (awaiting phase master merge)`));
+              } else {
+                // Normal mode OR phase master: Mark as dev-complete
+                console.log(chalk.green(`   Marking as Dev Complete`));
 
-                        // Clear assigned instance since work is complete
-                        await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
-                      }
-                    } catch (error) {
-                      if (this.verbose) {
-                        console.log(chalk.yellow(`   ⚠️  Could not update project status: ${error}`));
-                      }
+                await this.assignmentManager.updateAssignment(assignment.id, {
+                  status: 'dev-complete',
+                  completedAt: new Date().toISOString(),
+                });
+
+                // Update GitHub project status
+                if (this.projectsAPI && this.fieldMapper) {
+                  try {
+                    const projectMetadata = await this.fieldMapper.getMetadataForIssues([assignment.issueNumber]);
+                    const metadata = projectMetadata.get(assignment.issueNumber);
+                    if (metadata?.projectItemId) {
+                      await this.projectsAPI.updateItemStatusByValue(
+                        metadata.projectItemId,
+                        'Dev Complete'
+                      );
+                      console.log(chalk.green(`   ✓ Updated GitHub project status to "Dev Complete"`));
+
+                      // Clear assigned instance since work is complete
+                      await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
+                    }
+                  } catch (error) {
+                    if (this.verbose) {
+                      console.log(chalk.yellow(`   ⚠️  Could not update project status: ${error}`));
                     }
                   }
                 }
+              }
 
-                // Add final work session
-                await this.assignmentManager.addWorkSession(assignment.id, {
-                  endedAt: new Date().toISOString(),
-                  summary: 'Work completed',
-                });
+              // Add final work session
+              await this.assignmentManager.addWorkSession(assignment.id, {
+                endedAt: new Date().toISOString(),
+                summary: 'Work completed',
+              });
 
-                if (prNumber) {
-                  console.log(chalk.blue(`   📋 PR #${prNumber} created`));
-                }
-              } else if (reviewResult && !reviewResult.passed) {
-                // Work is incomplete - document what's left and resurrect
-                const failureReasons = reviewResult.reviewResult.failureReasons || [];
-                const remainingWork = failureReasons.join('\n- ');
+              if (prNumber) {
+                console.log(chalk.blue(`   📋 PR #${prNumber} created`));
+              }
+            } else if (reviewResult && !reviewResult.passed) {
+              // Work is incomplete - document what's left and resurrect
+              const failureReasons = reviewResult.reviewResult.failureReasons || [];
+              const remainingWork = failureReasons.join('\n- ');
 
-                console.log(chalk.yellow(`   ⚠️  AI Review: Work incomplete`));
-                console.log(chalk.gray(`   Remaining work:\n   - ${remainingWork}`));
+              console.log(chalk.yellow(`   ⚠️  AI Review: Work incomplete`));
+              console.log(chalk.gray(`   Remaining work:\n   - ${remainingWork}`));
 
-                // Post comment to GitHub documenting resurrection state
-                if (this.githubAPI) {
-                  try {
-                    const comment = `## 🔄 Process Resurrected
+              // Post comment to GitHub documenting resurrection state
+              if (this.githubAPI) {
+                try {
+                  const comment = `## 🔄 Process Resurrected
 
 **Status:** Work in progress detected after process termination
 
@@ -1613,95 +1636,94 @@ The autonomous system is resuming work on this issue. The LLM will address the r
 ---
 *Automated resurrection at ${new Date().toISOString()}*`;
 
-                    await this.githubAPI.createComment(assignment.issueNumber, comment);
-                    console.log(chalk.gray(`   ✓ Posted resurrection status to GitHub issue`));
-                  } catch (error) {
-                    if (this.verbose) {
-                      console.log(chalk.yellow(`   ⚠️  Could not post comment: ${error}`));
-                    }
+                  await this.githubAPI.createComment(assignment.issueNumber, comment);
+                  console.log(chalk.gray(`   ✓ Posted resurrection status to GitHub issue`));
+                } catch (error) {
+                  if (this.verbose) {
+                    console.log(chalk.yellow(`   ⚠️  Could not post comment: ${error}`));
                   }
                 }
               }
-            } catch (error) {
-              // Review failed - proceed with resurrection anyway
-              console.log(chalk.yellow(`   ⚠️  Review failed, proceeding with resurrection`));
-              if (this.verbose) {
-                console.log(chalk.gray(`   Error: ${error instanceof Error ? error.message : String(error)}`));
-              }
+            }
+          } catch (error) {
+            // Review failed - proceed with resurrection anyway
+            console.log(chalk.yellow(`   ⚠️  Review failed, proceeding with resurrection`));
+            if (this.verbose) {
+              console.log(chalk.gray(`   Error: ${error instanceof Error ? error.message : String(error)}`));
             }
           }
-
-          console.log(chalk.blue(`   Resurrecting process...`));
-
-          // Generate continuation prompt
-          const prompt = PromptBuilder.buildContinuationPrompt({
-            assignment,
-            worktreePath: assignment.worktreePath,
-            lastSummary: assignment.workSessions.length > 0
-              ? assignment.workSessions[assignment.workSessions.length - 1].summary
-              : undefined,
-          });
-
-          // Restart the LLM instance
-          const newInstanceId = await adapter.start({
-            assignment,
-            prompt,
-            workingDirectory: assignment.worktreePath,
-          });
-
-          // Update assignment with new instance ID and process ID
-          const newStatus = await adapter.getStatus(newInstanceId);
-          assignment.llmInstanceId = newInstanceId;
-          assignment.processId = newStatus.processId || undefined;
-
-          await this.assignmentManager.updateAssignment(assignment.id, {
-            lastActivity: new Date().toISOString(),
-            processId: newStatus.processId,
-          });
-
-          // Update "Assigned Instance" field in project to new instance ID
-          if (this.projectsAPI && this.fieldMapper) {
-            try {
-              const projectMetadata = await this.fieldMapper.getMetadataForIssues([assignment.issueNumber]);
-              const metadata = projectMetadata.get(assignment.issueNumber);
-              if (metadata?.projectItemId) {
-                const assignedInstanceField = this.configManager.getConfig().project?.fields.assignedInstance;
-                if (assignedInstanceField) {
-                  await this.projectsAPI.updateItemTextField(
-                    metadata.projectItemId,
-                    assignedInstanceField.fieldName,
-                    newInstanceId
-                  );
-                }
-              }
-            } catch (error) {
-              console.log(chalk.yellow(`   ⚠️  Could not update Assigned Instance field in project`));
-            }
-          }
-
-          // Add a new work session for the resurrection
-          await this.assignmentManager.addWorkSession(assignment.id, {
-            startedAt: new Date().toISOString(),
-            promptUsed: prompt,
-            summary: 'Process resurrected after unexpected termination',
-          });
-
-          console.log(chalk.green(`✓ Process resurrected with new instance: ${newInstanceId}`));
-
-          // Wait 5 seconds for process to stabilize and start properly
-          console.log(chalk.gray('   Waiting for process to stabilize...'));
-          await new Promise(resolve => setTimeout(resolve, 5000));
-
-          // Verify the process is actually running after stabilization period
-          if (newStatus.processId && !isProcessRunning(newStatus.processId)) {
-            console.log(chalk.yellow(`   ⚠️  Warning: Resurrected process ${newStatus.processId} is not running after 5s`));
-            console.log(chalk.gray('   The process may need more time or failed to start properly'));
-          } else if (this.verbose) {
-            console.log(chalk.green('   ✓ Process verified running'));
-          }
-
-          // PTY mode handles real-time output directly (no log monitoring needed)
         }
+
+        console.log(chalk.blue(`   Resurrecting process...`));
+
+        // Generate continuation prompt
+        const prompt = PromptBuilder.buildContinuationPrompt({
+          assignment,
+          worktreePath: assignment.worktreePath,
+          lastSummary: assignment.workSessions.length > 0
+            ? assignment.workSessions[assignment.workSessions.length - 1].summary
+            : undefined,
+        });
+
+        // Restart the LLM instance
+        const newInstanceId = await adapter.start({
+          assignment,
+          prompt,
+          workingDirectory: assignment.worktreePath,
+        });
+
+        // Update assignment with new instance ID and process ID
+        const newStatus = await adapter.getStatus(newInstanceId);
+        assignment.llmInstanceId = newInstanceId;
+        assignment.processId = newStatus.processId || undefined;
+
+        await this.assignmentManager.updateAssignment(assignment.id, {
+          lastActivity: new Date().toISOString(),
+          processId: newStatus.processId,
+        });
+
+        // Update "Assigned Instance" field in project to new instance ID
+        if (this.projectsAPI && this.fieldMapper) {
+          try {
+            const projectMetadata = await this.fieldMapper.getMetadataForIssues([assignment.issueNumber]);
+            const metadata = projectMetadata.get(assignment.issueNumber);
+            if (metadata?.projectItemId) {
+              const assignedInstanceField = this.configManager.getConfig().project?.fields.assignedInstance;
+              if (assignedInstanceField) {
+                await this.projectsAPI.updateItemTextField(
+                  metadata.projectItemId,
+                  assignedInstanceField.fieldName,
+                  newInstanceId
+                );
+              }
+            }
+          } catch (error) {
+            console.log(chalk.yellow(`   ⚠️  Could not update Assigned Instance field in project`));
+          }
+        }
+
+        // Add a new work session for the resurrection
+        await this.assignmentManager.addWorkSession(assignment.id, {
+          startedAt: new Date().toISOString(),
+          promptUsed: prompt,
+          summary: 'Process resurrected after unexpected termination',
+        });
+
+        console.log(chalk.green(`✓ Process resurrected with new instance: ${newInstanceId}`));
+
+        // Wait 5 seconds for process to stabilize and start properly
+        console.log(chalk.gray('   Waiting for process to stabilize...'));
+        await new Promise(resolve => setTimeout(resolve, 5000));
+
+        // Verify the process is actually running after stabilization period
+        if (newStatus.processId && !isProcessRunning(newStatus.processId)) {
+          console.log(chalk.yellow(`   ⚠️  Warning: Resurrected process ${newStatus.processId} is not running after 5s`));
+          console.log(chalk.gray('   The process may need more time or failed to start properly'));
+        } else if (this.verbose) {
+          console.log(chalk.green('   ✓ Process verified running'));
+        }
+
+        // PTY mode handles real-time output directly (no log monitoring needed)
       }
     } catch (error) {
       console.error(
@@ -1860,7 +1882,7 @@ The autonomous system is resuming work on this issue. The LLM will address the r
         // Check if process is actually running FIRST (process check is more reliable than session file)
         if (status.processId && !isProcessRunning(status.processId)) {
           // Process has exited - check for completion signals and indicators
-          const logPath = join(this.autonomousDataDir, `output-${assignment.llmInstanceId}.log`);
+          const logPath = this.getLogPath(assignment.llmInstanceId);
 
           // PRIMARY: Check for explicit autonomous signals (most reliable)
           const autonomousSignals = detectAutonomousSignals(logPath);
@@ -2258,17 +2280,8 @@ The autonomous system is resuming work on this issue. The LLM will address the r
   /**
    * Create LLM adapter
    */
-  private createAdapter(provider: LLMProvider, config: LLMConfig): LLMAdapter {
-    switch (provider) {
-      case 'claude':
-        return new ClaudeAdapter(config, this.autonomousDataDir, this.verbose);
-      case 'gemini':
-        throw new Error('Gemini adapter not implemented yet');
-      case 'codex':
-        throw new Error('Codex adapter not implemented yet');
-      default:
-        throw new Error(`Unknown provider: ${provider}`);
-    }
+  private createAdapter(provider: LLMProvider): LLMAdapter {
+    return LLMFactory.create([provider], this.configManager.getConfig().llms, this.autonomousDataDir, this.verbose);
   }
 
   /**

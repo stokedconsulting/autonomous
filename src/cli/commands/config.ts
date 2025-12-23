@@ -7,6 +7,8 @@ import { LLMProvider, LLMConfig } from '../../types/index.js';
 import { parseGitHubRemote } from '../../git/utils.js';
 import { DependencyChecker } from '../../utils/dependency-checker.js';
 import chalk from 'chalk';
+import { parseLLMProvider } from '../../utils/llm-provider.js';
+import { resolveCliArgs, resolveCliPath, resolveHooksEnabled } from '../../llm/cli-defaults.js';
 
 interface InitOptions {
   githubOwner?: string;
@@ -212,10 +214,10 @@ async function init(options: InitOptions): Promise<void> {
 async function addLLM(provider: string, options: AddLLMOptions): Promise<void> {
   try {
     // Validate provider
-    const validProviders: LLMProvider[] = ['claude', 'gemini', 'codex'];
-    if (!validProviders.includes(provider as LLMProvider)) {
+    const parsedProvider = parseLLMProvider(provider);
+    if (!parsedProvider) {
       console.error(chalk.red(`Invalid provider: ${provider}`));
-      console.log('Valid providers:', validProviders.join(', '));
+      console.log('Valid providers: claude, gemini, codex');
       process.exit(1);
     }
 
@@ -239,14 +241,14 @@ async function addLLM(provider: string, options: AddLLMOptions): Promise<void> {
     if (options.enableHooks !== undefined) updateConfig.hooksEnabled = options.enableHooks;
 
     // Enable the LLM with provided options
-    await configManager.enableLLM(provider as LLMProvider, updateConfig);
+    await configManager.enableLLM(parsedProvider, updateConfig);
 
-    console.log(chalk.green(`✓ ${provider} enabled`));
+    console.log(chalk.green(`✓ ${parsedProvider} enabled`));
 
-    if (provider === 'claude' && !options.cliPath) {
+    if (parsedProvider === 'claude' && !options.cliPath) {
       console.log(chalk.yellow('\nNote: Using default CLI path "claude"'));
       console.log('If Claude is installed elsewhere, set the path with:');
-      console.log(`  auto config set llms.${provider}.cliPath <path>`);
+      console.log(`  auto config set llms.${parsedProvider}.cliPath <path>`);
     }
 
     // Validate configuration
@@ -259,6 +261,62 @@ async function addLLM(provider: string, options: AddLLMOptions): Promise<void> {
     }
   } catch (error) {
     console.error(chalk.red('Error adding LLM provider:'), error);
+    process.exit(1);
+  }
+}
+
+/**
+ * Enable a single LLM provider and disable others
+ */
+async function useLLM(provider: string, options: AddLLMOptions): Promise<void> {
+  try {
+    const parsedProvider = parseLLMProvider(provider);
+    if (!parsedProvider) {
+      console.error(chalk.red(`Invalid provider: ${provider}`));
+      console.log('Valid providers: claude, gemini, codex');
+      process.exit(1);
+    }
+
+    const cwd = process.cwd();
+    const configManager = new ConfigManager(cwd);
+
+    await configManager.initialize();
+    const config = configManager.getConfig();
+
+    const cliArgs = options.cliArgs
+      ? options.cliArgs.split(' ').filter(arg => arg.length > 0)
+      : undefined;
+
+    // Disable all other providers
+    for (const providerKey of Object.keys(config.llms) as LLMProvider[]) {
+      config.llms[providerKey].enabled = providerKey === parsedProvider;
+    }
+
+    const providerConfig = config.llms[parsedProvider];
+
+    providerConfig.cliPath = options.cliPath
+      ? options.cliPath
+      : resolveCliPath(parsedProvider, providerConfig.cliPath);
+    providerConfig.cliArgs = cliArgs
+      ? cliArgs
+      : resolveCliArgs(parsedProvider, providerConfig.cliArgs);
+    providerConfig.hooksEnabled = options.enableHooks !== undefined
+      ? options.enableHooks
+      : resolveHooksEnabled(parsedProvider, providerConfig.hooksEnabled);
+
+    if (options.maxConcurrent) {
+      providerConfig.maxConcurrentIssues = options.maxConcurrent;
+    }
+
+    if (options.apiKey) {
+      providerConfig.apiKey = options.apiKey;
+    }
+
+    await configManager.save();
+
+    console.log(chalk.green(`✓ Using ${parsedProvider} as the active provider`));
+  } catch (error) {
+    console.error(chalk.red('Error updating LLM provider:'), error);
     process.exit(1);
   }
 }
@@ -346,6 +404,7 @@ async function validate(): Promise<void> {
 export const configCommand = {
   init,
   addLLM,
+  useLLM,
   show,
   validate,
 };

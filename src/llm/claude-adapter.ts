@@ -9,6 +9,7 @@ import { LLMAdapter, LLMStatus, StartLLMOptions } from './adapter.js';
 import { LLMConfig } from '../types/index.js';
 import { ClaudePTYExecutor } from './claude-pty-executor.js';
 import { ClaudePrintExecutor } from './claude-print-executor.js';
+import { resolveCliArgs, resolveCliPath } from './cli-defaults.js';
 
 interface ClaudeInstance {
   instanceId: string;
@@ -26,11 +27,13 @@ export class ClaudeAdapter implements LLMAdapter {
   private instances = new Map<string, ClaudeInstance>();
   private autonomousDataDir: string;
   private verbose: boolean;
+  private preserveLogsOnStop: boolean;
 
   constructor(config: LLMConfig, autonomousDataDir: string, verbose: boolean = false) {
     this.config = config;
     this.autonomousDataDir = autonomousDataDir;
     this.verbose = verbose;
+    this.preserveLogsOnStop = this.config.customConfig?.preserveLogsOnStop ?? true;
   }
 
   /**
@@ -58,7 +61,8 @@ export class ClaudeAdapter implements LLMAdapter {
     await fs.mkdir(this.getSubdirectory('logs'), { recursive: true });
 
     const logFile = join(this.getSubdirectory('logs'), `output-${instanceId}.log`);
-    const cliPath = this.config.cliPath || 'claude';
+    const cliPath = resolveCliPath('claude', this.config.cliPath);
+    const cliArgs = resolveCliArgs('claude', this.config.cliArgs);
 
     // Create log header
     const logHeader = `=== Claude Autonomous Session Starting ===\nInstance ID: ${instanceId}\nWorking Directory: ${workingDirectory}\nStarted: ${new Date().toISOString()}\n========================================\n\n`;
@@ -88,6 +92,7 @@ export class ClaudeAdapter implements LLMAdapter {
         logFile,
         instanceId,
         claudePath: cliPath,
+        claudeArgs: cliArgs,
         onData: (data: string) => {
           // Real-time output to console
           process.stdout.write(data);
@@ -113,6 +118,7 @@ export class ClaudeAdapter implements LLMAdapter {
         logFile,
         instanceId,
         claudePath: cliPath,
+        claudeArgs: cliArgs,
       });
 
       pid = printExecutor.getPid();
@@ -176,7 +182,7 @@ export class ClaudeAdapter implements LLMAdapter {
     }
 
     // Clean up session files
-    await this.cleanupSessionFiles(instanceId);
+    await this.cleanupSessionFiles(instanceId, this.preserveLogsOnStop);
   }
 
   /**
@@ -477,15 +483,17 @@ echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") - Tool: \${TOOL_NAME:-unknown}" >> "\$ACT
   /**
    * Clean up session files after stop
    */
-  private async cleanupSessionFiles(instanceId: string): Promise<void> {
+  private async cleanupSessionFiles(instanceId: string, preserveLogs: boolean): Promise<void> {
     const filesToCleanup = [
       join(this.getSubdirectory('sessions'), `start-${instanceId}.sh`),
       join(this.getSubdirectory('sessions'), `session-${instanceId}.json`),
       join(this.getSubdirectory('prompts'), `prompt-${instanceId}.txt`),
-      join(this.getSubdirectory('logs'), `output-${instanceId}.log`),
       join(this.autonomousDataDir, `stop-signal-${instanceId}.json`),
       join(this.autonomousDataDir, `activity-${instanceId}.log`),
     ];
+    if (!preserveLogs) {
+      filesToCleanup.push(join(this.getSubdirectory('logs'), `output-${instanceId}.log`));
+    }
 
     for (const file of filesToCleanup) {
       try {

@@ -12,13 +12,14 @@ import chalk from 'chalk';
 import { GitHubAPI } from '../../github/api.js';
 import { AssignmentManager } from '../../core/assignment-manager.js';
 import { ProjectField, ProjectFieldOption } from '../../github/projects-api.js';
-import { Assignment } from '../../types/assignments.js';
+import { Assignment, LLMProvider } from '../../types/assignments.js';
 import { PrioritizedIssue } from '../../core/project-aware-prioritizer.js';
 import { ProjectDiscovery, DiscoveredProject } from '../../github/project-discovery.js';
 import { WorktreeManager } from '../../git/worktree-manager.js';
-import { ClaudeAdapter } from '../../llm/claude-adapter.js';
+import { LLMFactory } from '../../llm/llm-factory.js';
 import { PromptBuilder } from '../../llm/prompt-builder.js';
 import { InstanceManager } from '../../core/instance-manager.js';
+import { resolveLLMProvider } from '../../utils/llm-provider.js';
 import { join } from 'path';
 import { promises as fs } from 'fs';
 import { basename } from 'path';
@@ -630,6 +631,7 @@ interface ProjectStartOptions extends ProjectCommandOptions {
   review?: boolean;
   interactive?: boolean;  // Use interactive Ink UI (default when --verbose)
   maxParallel?: number;   // Max parallel evaluations (default: 3)
+  provider?: string;
 }
 
 // Track running project processes (in-memory for single process enforcement)
@@ -637,7 +639,7 @@ const runningProjects = new Map<string, { pid: number; worktreePath: string; ins
 
 /**
  * Start autonomous work on a specific GitHub Project
- * Creates feature branch and worktree if needed, then starts Claude working on project items
+ * Creates feature branch and worktree if needed, then starts the selected LLM on project items
  *
  * With --review flag: Creates a new project from description, allows review, then starts work
  * With --verbose or --interactive: Uses interactive Ink UI with parallel processing
@@ -659,6 +661,7 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
         verbose: options.verbose,
         maxParallel: options.maxParallel || 3,
         dryRun: options.dryRun,
+        provider: options.provider,
       });
       return;
     } catch (error) {
@@ -885,10 +888,17 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
 
     // Get next available instance slot
     console.log(chalk.blue('\n🔍 Finding available instance slot...'));
-    const availableSlot = instanceManager.getNextAvailableSlot('claude');
+    let llmProvider: LLMProvider;
+    try {
+      llmProvider = resolveLLMProvider(config, options.provider);
+    } catch (error) {
+      console.error(chalk.red(`Error selecting provider: ${error instanceof Error ? error.message : String(error)}`));
+      process.exit(1);
+    }
+    const availableSlot = instanceManager.getNextAvailableSlot(llmProvider);
 
     if (!availableSlot) {
-      console.error(chalk.red(`✗ No available Claude instances (max: ${config.llms.claude.maxConcurrentIssues})`));
+      console.error(chalk.red(`✗ No available ${llmProvider} instances (max: ${config.llms[llmProvider].maxConcurrentIssues})`));
       console.log(chalk.yellow('Try increasing maxConcurrentIssues in .autonomous-config.json'));
       process.exit(1);
     }
@@ -897,17 +907,16 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
 
     // Create assignment
     console.log(chalk.blue('\n📝 Creating assignment...'));
-    const assignment = await assignmentManager.createAssignment({
+const assignment = await assignmentManager.createAssignment({
       issueNumber,
       issueTitle: issue.title,
       issueBody: issue.body || undefined,
-      llmProvider: 'claude',
+      llmProvider,
       worktreePath,
       branchName,
       requiresTests: config.requirements.testingRequired,
       requiresCI: config.requirements.ciMustPass,
     });
-
     // Update assignment with slot-based instance ID
     await assignmentManager.updateAssignment(assignment.id, {
       llmInstanceId: availableSlot.instanceId,
@@ -934,16 +943,15 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
       worktreePath,
     });
 
-    // Start Claude instance
-    console.log(chalk.blue('\n🤖 Starting Claude instance...'));
+    // Start LLM instance
+    console.log(chalk.blue('\n🤖 Starting LLM instance...'));
 
     const autonomousDataDir = join(cwd, '.autonomous');
     await fs.mkdir(autonomousDataDir, { recursive: true });
 
-    const claudeConfig = configManager.getLLMConfig('claude');
-    const claudeAdapter = new ClaudeAdapter(claudeConfig, autonomousDataDir, options.verbose);
+    const llmAdapter = LLMFactory.create([llmProvider], config.llms, autonomousDataDir, options.verbose || false);
 
-    await claudeAdapter.start({
+    await llmAdapter.start({
       assignment,
       prompt,
       workingDirectory: worktreePath,
@@ -977,11 +985,11 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
     console.log(chalk.gray(`  auto status`));
 
     if (options.verbose) {
-      console.log(chalk.blue('\n📡 Streaming Claude output...\n'));
+      console.log(chalk.blue('\n📡 Streaming LLM output...\n'));
       console.log(chalk.gray('─'.repeat(80)));
     } else {
-      console.log(chalk.blue('\nClaude is now working...'));
-      console.log(chalk.gray('Tip: Use --verbose flag to stream Claude output in real-time'));
+      console.log(chalk.blue('\nLLM is now working...'));
+      console.log(chalk.gray('Tip: Use --verbose flag to stream LLM output in real-time'));
       console.log('Press Ctrl+C to stop\n');
     }
 
@@ -995,7 +1003,7 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
       console.log(chalk.yellow('\n\nStopping autonomous work...'));
       isRunning = false;
       try {
-        await claudeAdapter.stop(currentInstanceId);
+        await llmAdapter.stop(currentInstanceId);
         runningProjects.delete(projectKey);
       } catch (e) {
         // Ignore stop errors
@@ -1013,16 +1021,16 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
       if (!isRunning) break;
 
       try {
-        // Check if Claude has finished responding (via Stop hook)
-        const status = await claudeAdapter.getStatus(currentInstanceId);
+        // Check if LLM has finished responding (via Stop hook)
+        const status = await llmAdapter.getStatus(currentInstanceId);
 
         if (!status.isRunning) {
-          // Claude finished responding - stop the process and process completion
-          console.log(chalk.gray('\n📝 Claude finished responding, analyzing results...'));
+          // LLM finished responding - stop the process and process completion
+          console.log(chalk.gray('\n📝 LLM finished responding, analyzing results...'));
 
-          // Stop the Claude process (it's waiting for input)
+          // Stop the LLM process (it's waiting for input)
           try {
-            await claudeAdapter.stop(currentInstanceId);
+            await llmAdapter.stop(currentInstanceId);
           } catch {
             // Process may have already exited, ignore
           }
@@ -1087,7 +1095,7 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
               issueNumber: nextIssue.number,
               issueTitle: nextIssue.title,
               issueBody: nextIssue.body || undefined,
-              llmProvider: 'claude',
+              llmProvider,
               worktreePath,
               branchName,
               requiresTests: config.requirements.testingRequired,
@@ -1095,9 +1103,9 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
             });
 
             // Get next slot (reuse the same slot since previous work is done)
-            const nextSlot = instanceManager.getNextAvailableSlot('claude');
+            const nextSlot = instanceManager.getNextAvailableSlot(llmProvider);
             if (!nextSlot) {
-              console.error(chalk.red('✗ No available Claude slots'));
+              console.error(chalk.red(`✗ No available ${llmProvider} slots`));
               break;
             }
 
@@ -1110,13 +1118,13 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
             await assignmentManager.ensureProjectItemId(nextAssignment.id);
             await assignmentManager.updateAssignedInstanceWithSync(nextAssignment.id, nextSlot.instanceId);
 
-            // Generate prompt and start Claude
+            // Generate prompt and start LLM
             const nextPrompt = PromptBuilder.buildInitialPrompt({
               assignment: nextAssignment,
               worktreePath,
             });
 
-            await claudeAdapter.start({
+            await llmAdapter.start({
               assignment: nextAssignment,
               prompt: nextPrompt,
               workingDirectory: worktreePath,
@@ -1149,8 +1157,8 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
                 : undefined,
             });
 
-            // Restart Claude
-            const newInstanceId = await claudeAdapter.start({
+            // Restart LLM
+            const newInstanceId = await llmAdapter.start({
               assignment: currentAssignment,
               prompt: continuePrompt,
               workingDirectory: worktreePath,
@@ -1219,7 +1227,9 @@ async function projectStartWithReview(
 
     const token = await getGitHubToken(config.github.token);
 
-    const claudePath = config.llms?.claude?.cliPath || 'claude';
+    const llmProvider = 'claude'; // For now, we are hardcoding this value
+    const llmConfig = config.llms[llmProvider];
+    const claudePath = llmConfig.cliPath || 'claude';
 
     // Step 1: Generate project plan
     console.log(chalk.cyan('🤖 Generating project plan...\n'));
@@ -1663,7 +1673,9 @@ export async function projectCreateCommand(
 
     const token = await getGitHubToken(config.github.token);
 
-    const claudePath = config.llms?.claude?.cliPath || 'claude';
+    const llmProvider = 'claude'; // For now, we are hardcoding this value
+    const llmConfig = config.llms[llmProvider];
+    const claudePath = llmConfig.cliPath || 'claude';
 
     // Step 1: Generate project plan
     console.log(chalk.cyan('🤖 Generating project plan...\n'));
@@ -1820,9 +1832,9 @@ export async function projectAddCommand(
     }
 
     const token = await getGitHubToken(config.github.token);
-    const claudePath = config.llms?.claude?.cliPath || 'claude';
-
-    // Find the target project
+const llmProvider = 'claude'; // For now, we are hardcoding this value
+    const llmConfig = config.llms[llmProvider];
+    const claudePath = llmConfig.cliPath || 'claude';
     const discovery = new ProjectDiscovery(config.github.owner, config.github.repo);
     const linkedProjects = await discovery.getLinkedProjects();
 
