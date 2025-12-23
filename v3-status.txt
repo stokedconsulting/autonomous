@@ -1,0 +1,729 @@
+stoked@arrakis v3 % auto project create "status subsystem to run at status.irable.com which shows the state both current (detailed last 24hr) and historical daily going
+ back in history as far as data exists.. the initial view should show an overall current state of the system using commonly used best practices for such a system.. there should be a detailed view somewhere that shows in detail the subsystems for the last 24hrs which covers the subsystems being online as well as the interconnectivity of the parts that need to be connected.. the last week with the last 24 hours worth of data being central
+dquote> 
+stoked@arrakis v3 % auto project create "status subsystem to run at status.irable.com which shows the state both current (detailed last 24hr) and historical daily going back in history as far as data exists.. the initial view should show an overall current state of the system using commonly used best practices for such a system.. there should be a detailed view somewhere that shows in detail the subsystems for the last 24hrs which covers the subsystems being online as well as the interconnectivity of the parts that need to be connected.."                                                               
+
+🎯 Creating New Project
+
+🤖 Generating project plan...
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Excellent! Now I have a comprehensive understanding of the system architecture. Let me create a detailed project plan for the status subsystem.
+
+`★ Insight ─────────────────────────────────────`
+**Key architectural insights from exploration:**
+1. **Three core services** need monitoring: Frontend (Next.js), API (NestJS), and WebRTC (mediasoup)
+2. **WebRTC already has excellent health endpoints** (`/`, `/chat/health`, `/stats`) with CloudWatch metrics
+3. **Major gaps exist**: NestJS API only returns `"healthy"` string, no unified dashboard, no historical data storage
+4. **Infrastructure dependencies**: MongoDB, Redis, S3, Cognito all need connectivity checks
+`─────────────────────────────────────────────────`
+
+---
+
+# Project Plan: Status Monitoring Subsystem (status.irable.com)
+
+## Overview
+
+Build a comprehensive status monitoring subsystem deployed at `status.irable.com` that provides:
+- **Real-time dashboard** showing current system health across all services
+- **24-hour detailed view** with granular subsystem status and interconnectivity visualization
+- **Historical daily view** with aggregated uptime metrics going back indefinitely
+- **Proactive alerting infrastructure** for critical failures
+
+The system will monitor: Frontend (Next.js), API (NestJS), WebRTC service, MongoDB, Redis, S3, and Cognito—plus inter-service connectivity.
+
+---
+
+## Phase 1: Health Check Infrastructure
+**Goal:** Establish comprehensive health endpoints across all services with standardized response formats
+
+### 1.1) Standardize Health Check Response Schema
+Create a shared health check response interface in `@desirable/common` that all services will implement:
+
+```typescript
+interface HealthCheckResponse {
+  status: 'operational' | 'degraded' | 'outage';
+  timestamp: string;
+  service: string;
+  version: string;
+  uptime: number;
+  checks: {
+    [checkName: string]: {
+      status: 'pass' | 'fail' | 'warn';
+      latency?: number;
+      message?: string;
+      lastSuccess?: string;
+    };
+  };
+  dependencies?: {
+    [depName: string]: {
+      status: 'connected' | 'disconnected' | 'degraded';
+      latency?: number;
+    };
+  };
+}
+```
+
+**Acceptance Criteria:**
+- [ ] Schema defined in `packages/common/src/interfaces/health.interface.ts`
+- [ ] Exported from `@desirable/common`
+- [ ] Includes JSDoc documentation for all fields
+- [ ] Unit tests for schema validation
+
+### 1.2) Enhance NestJS API Health Endpoint
+Replace the basic `"healthy"` response with comprehensive health checks:
+
+**Checks to implement:**
+- MongoDB connection pool status and latency
+- Redis connection status and latency
+- S3 bucket accessibility (list operation)
+- Cognito user pool connectivity
+- Memory/CPU usage metrics
+
+**Acceptance Criteria:**
+- [ ] New `GET /health` endpoint returning standardized schema
+- [ ] Individual check timeouts (5s max per check)
+- [ ] Graceful degradation (partial failures don't crash endpoint)
+- [ ] Response time < 2s for full health check
+- [ ] Legacy `GET /` endpoint preserved for backwards compatibility
+
+### 1.3) Add Frontend Health Endpoint
+Create a Next.js API route for frontend health monitoring:
+
+**Checks to implement:**
+- Server-side rendering capability
+- API connectivity (can reach NestJS)
+- Session service availability
+- Build version and deployment timestamp
+
+**Acceptance Criteria:**
+- [ ] `GET /api/health` endpoint in `apps/site/src/app/api/health/route.ts`
+- [ ] Returns standardized health schema
+- [ ] Includes build metadata from environment
+- [ ] Tests API reachability with timeout
+
+### 1.4) Enhance WebRTC Health Endpoint
+Extend existing WebRTC health endpoints to match standardized schema:
+
+**Current endpoints to enhance:**
+- `GET /` → Add dependency checks (Redis, API connectivity)
+- Add MongoDB connection check (stream key lookups)
+- Add CloudWatch metrics push status
+
+**Acceptance Criteria:**
+- [ ] `GET /health` returns standardized schema
+- [ ] Includes mediasoup worker status
+- [ ] Reports UDP port availability
+- [ ] Maintains backwards compatibility with existing `/` response
+
+### 1.5) Create Inter-Service Connectivity Checks
+Implement cross-service health verification:
+
+**Connectivity matrix:**
+- Frontend → API (HTTP)
+- Frontend → WebRTC (WebSocket)
+- API → MongoDB (TCP)
+- API → Redis (TCP)
+- API → S3 (HTTPS)
+- WebRTC → API (HTTP)
+- WebRTC → Redis (TCP)
+
+**Acceptance Criteria:**
+- [ ] Each service reports its outbound connectivity status
+- [ ] Latency measurements included for each connection
+- [ ] Connection failures include error classification
+
+---
+
+## Phase 2: Status Aggregation Service
+**Goal:** Create a dedicated service to collect, aggregate, and store health metrics
+
+### 2.1) Design Status Service Architecture
+Create a lightweight NestJS service for status aggregation:
+
+**Location:** `packages/status` (new package in monorepo)
+
+**Responsibilities:**
+- Poll all service health endpoints every 30 seconds
+- Store health snapshots in MongoDB (time-series collection)
+- Calculate uptime percentages and incident windows
+- Expose aggregated status API
+
+**Acceptance Criteria:**
+- [ ] Package initialized with NestJS scaffold
+- [ ] Added to monorepo workspaces
+- [ ] Dockerfile for containerized deployment
+- [ ] SST stack created (`stacks/status.ts`)
+
+### 2.2) Implement Health Polling Engine
+Create a robust polling system with retry logic:
+
+**Features:**
+- Parallel polling of all services
+- Configurable intervals (default 30s, incident mode 10s)
+- Automatic retry with exponential backoff
+- Circuit breaker for persistently failing endpoints
+
+**Acceptance Criteria:**
+- [ ] Polls all 3 services (Frontend, API, WebRTC)
+- [ ] Handles timeouts gracefully (10s max)
+- [ ] Logs all poll results to CloudWatch
+- [ ] Triggers incident mode on consecutive failures (3+)
+
+### 2.3) Design Status Data Model
+Create MongoDB schema for storing historical status data:
+
+```typescript
+// Granular snapshots (kept 48 hours)
+interface StatusSnapshot {
+  timestamp: Date;
+  services: Map<ServiceName, HealthCheckResponse>;
+  overallStatus: 'operational' | 'degraded' | 'outage';
+}
+
+// Daily aggregates (kept indefinitely)
+interface DailyStatusSummary {
+  date: string; // YYYY-MM-DD
+  services: Map<ServiceName, {
+    uptimePercent: number;
+    incidents: Incident[];
+    avgLatency: number;
+  }>;
+  overallUptime: number;
+}
+```
+
+**Acceptance Criteria:**
+- [ ] Mongoose schemas defined in `packages/common`
+- [ ] TTL index on snapshots (48h expiry)
+- [ ] Daily aggregation cron job
+- [ ] Migration script for initial deployment
+
+### 2.4) Create Status API Endpoints
+Expose aggregated status data via REST API:
+
+**Endpoints:**
+- `GET /status` - Current system status (cached 30s)
+- `GET /status/history?range=24h` - Granular snapshots
+- `GET /status/history?range=30d` - Daily summaries
+- `GET /status/incidents` - Active and recent incidents
+- `GET /status/subscribe` - SSE stream for real-time updates
+
+**Acceptance Criteria:**
+- [ ] All endpoints documented with OpenAPI
+- [ ] Response times < 200ms (cached)
+- [ ] CORS configured for status.irable.com
+- [ ] Rate limiting (100 req/min)
+
+### 2.5) Implement Incident Detection Logic
+Create automated incident detection and resolution:
+
+**Rules:**
+- **Outage**: Any service returns `outage` status or is unreachable
+- **Degraded**: Any service returns `degraded` or latency > threshold
+- **Resolved**: All services return `operational` for 5+ minutes
+
+**Acceptance Criteria:**
+- [ ] Incidents auto-created on threshold breach
+- [ ] Incidents auto-resolved when recovered
+- [ ] Incident duration tracked accurately
+- [ ] Historical incidents queryable
+
+---
+
+## Phase 3: Status Dashboard Frontend
+**Goal:** Build a public-facing status page with real-time updates and historical views
+
+### 3.1) Create Status Site Application
+Initialize a new Next.js application for the status dashboard:
+
+**Location:** `apps/status` (separate from main site)
+
+**Tech stack:**
+- Next.js 15 (App Router)
+- Tailwind CSS (lightweight styling)
+- React Query (data fetching)
+- Recharts (visualizations)
+
+**Acceptance Criteria:**
+- [ ] Next.js app initialized with TypeScript
+- [ ] Tailwind CSS configured
+- [ ] Added to monorepo workspaces
+- [ ] SST deployment configured for status.irable.com
+
+### 3.2) Build Current Status Overview
+Create the main landing page showing real-time system status:
+
+**Components:**
+- Overall status banner (green/yellow/red)
+- Service status cards with indicators
+- Active incidents section
+- Last updated timestamp with live updates
+
+**Design requirements:**
+- Mobile-responsive layout
+- Dark/light mode support
+- Accessibility (WCAG 2.1 AA)
+- < 3s initial load time
+
+**Acceptance Criteria:**
+- [ ] Overall status prominently displayed
+- [ ] All services shown with current state
+- [ ] Auto-refresh every 30 seconds
+- [ ] Loading and error states handled
+
+### 3.3) Build 24-Hour Detailed View
+Create interactive timeline showing granular status:
+
+**Features:**
+- Timeline visualization (30-second granularity)
+- Service-by-service breakdown
+- Latency graphs per service
+- Incident markers on timeline
+- Connectivity matrix visualization
+
+**Acceptance Criteria:**
+- [ ] Interactive timeline with zoom/pan
+- [ ] Click on incident shows details
+- [ ] Connectivity diagram shows inter-service links
+- [ ] Performance: renders 2880 data points smoothly
+
+### 3.4) Build Historical Daily View
+Create calendar-based view of historical uptime:
+
+**Features:**
+- Monthly calendar heatmap
+- Daily uptime percentages
+- Drill-down to specific dates
+- Export functionality (CSV)
+
+**Acceptance Criteria:**
+- [ ] Calendar shows 90+ days of history
+- [ ] Color-coded by uptime percentage
+- [ ] Click date shows daily breakdown
+- [ ] Responsive on mobile
+
+### 3.5) Implement Real-Time Updates
+Add live updates without page refresh:
+
+**Implementation:**
+- Server-Sent Events (SSE) connection
+- Optimistic UI updates
+- Reconnection logic with backoff
+- Visual notification on status changes
+
+**Acceptance Criteria:**
+- [ ] Status updates appear within 5 seconds
+- [ ] Connection state indicator shown
+- [ ] Graceful reconnection on disconnect
+- [ ] Battery-efficient on mobile
+
+---
+
+## Phase 4: Infrastructure & Deployment
+**Goal:** Deploy status subsystem with high availability and proper domain routing
+
+### 4.1) Create SST Stack for Status Service
+Define infrastructure for the status aggregation service:
+
+**Components:**
+- Lambda function for status API (or ECS for persistent polling)
+- API Gateway with custom domain
+- CloudWatch log groups
+- IAM roles with minimal permissions
+
+**Acceptance Criteria:**
+- [ ] `stacks/status.ts` created
+- [ ] Deployed to production environment
+- [ ] Accessible at api.status.irable.com
+- [ ] CloudWatch alarms configured
+
+### 4.2) Configure Domain Routing
+Set up status.irable.com subdomain:
+
+**DNS Configuration:**
+- `status.irable.com` → Status dashboard (CloudFront)
+- `api.status.irable.com` → Status API (API Gateway)
+
+**Acceptance Criteria:**
+- [ ] SSL certificates provisioned
+- [ ] DNS records configured in Route 53
+- [ ] HTTPS enforced with redirects
+- [ ] CDN caching optimized
+
+### 4.3) Implement High Availability
+Ensure status system remains available during main system outages:
+
+**Strategy:**
+- Status service runs in separate AWS region (or isolated VPC)
+- Independent MongoDB collection (or DynamoDB for isolation)
+- Static fallback page on S3 if status site fails
+
+**Acceptance Criteria:**
+- [ ] Status service independent of main infrastructure
+- [ ] Can report main system outages while remaining available
+- [ ] Fallback static page deployed to S3
+- [ ] Tested with simulated outages
+
+### 4.4) Set Up Monitoring & Alerting
+Configure alerts for the status system itself:
+
+**Alerts:**
+- Status service health check failures
+- Polling failures > 3 consecutive
+- Dashboard 5xx errors
+- SSL certificate expiry (30 day warning)
+
+**Acceptance Criteria:**
+- [ ] CloudWatch alarms created
+- [ ] SNS topic for alerts
+- [ ] Email notifications configured
+- [ ] PagerDuty/Slack integration (optional)
+
+---
+
+## Phase 5: Polish & Documentation
+**Goal:** Finalize user experience and create operational documentation
+
+### 5.1) Add Incident Communication Features
+Enable manual incident updates and communications:
+
+**Features:**
+- Admin interface to post incident updates
+- Scheduled maintenance announcements
+- Incident timeline with updates
+- RSS/Atom feed for status updates
+
+**Acceptance Criteria:**
+- [ ] Admin can create/update incidents manually
+- [ ] Scheduled maintenance shown on dashboard
+- [ ] RSS feed available at /feed.xml
+- [ ] Email subscription (optional)
+
+### 5.2) Performance Optimization
+Ensure dashboard loads quickly and handles scale:
+
+**Optimizations:**
+- Static generation where possible
+- API response caching (Redis)
+- Image optimization
+- Bundle size < 200KB
+
+**Acceptance Criteria:**
+- [ ] Lighthouse score > 90
+- [ ] First Contentful Paint < 1.5s
+- [ ] Time to Interactive < 3s
+- [ ] Works on slow 3G connections
+
+### 5.3) Create Operational Runbooks
+Document operational procedures:
+
+**Runbooks:**
+- Manual incident creation
+- Responding to false positives
+- Adding new services to monitoring
+- Debugging polling failures
+- Disaster recovery procedures
+
+**Acceptance Criteria:**
+- [ ] Runbooks in `docs/status-operations/`
+- [ ] Covers all common scenarios
+- [ ] Reviewed by team
+- [ ] Linked from dashboard admin
+
+### 5.4) Write API Documentation
+Document all status API endpoints:
+
+**Documentation:**
+- OpenAPI specification
+- Example requests/responses
+- Authentication (if any)
+- Rate limiting details
+
+**Acceptance Criteria:**
+- [ ] OpenAPI spec in `packages/status/openapi.yaml`
+- [ ] Swagger UI available at /docs
+- [ ] Postman collection exported
+- [ ] Versioning strategy documented
+
+---
+
+## Success Criteria
+
+**Functional Requirements:**
+- [ ] Real-time status visible at status.irable.com
+- [ ] All 3 core services monitored (Frontend, API, WebRTC)
+- [ ] 6+ dependency checks (MongoDB, Redis, S3, Cognito, inter-service)
+- [ ] 24-hour granular history with 30-second resolution
+- [ ] Historical daily data retained indefinitely
+- [ ] Automatic incident detection and resolution
+
+**Non-Functional Requirements:**
+- [ ] Status page loads in < 3 seconds
+- [ ] 99.9% availability of status system itself
+- [ ] Status updates within 60 seconds of actual state change
+- [ ] Mobile-responsive design
+- [ ] WCAG 2.1 AA accessibility compliance
+
+**Operational Requirements:**
+- [ ] Operational runbooks complete
+- [ ] Alerting configured and tested
+- [ ] Disaster recovery plan documented
+- [ ] Team trained on incident management
+
+---
+
+`★ Insight ─────────────────────────────────────`
+**Why this architecture?**
+1. **Separate deployment** ensures status page stays up even when main system fails
+2. **Two-tier storage** (granular 48h + daily forever) balances detail with cost
+3. **SSE over WebSockets** is simpler and sufficient for one-way status updates
+4. **Polling over push** from services provides consistent data even if a service is completely down
+`─────────────────────────────────────────────────`
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔍 Parsing project structure...
+
+  Found 5 phases with 23 work items
+
+📋 Creating GitHub Project board...
+
+  Applying Autonomous Project Template...
+    ⚠ Could not create field Status: Command failed: gh api graphql -f query='
+      mutation {
+        createProjectV2Field(input: {
+          projectId: "PVT_kwDOBW_6Ns4BLNnw"
+          dataType: SINGLE_SELECT
+          name: "Status"
+          singleSelectOptions: [{ name: "Backlog", color: GREEN }, { name: "Todo", color: GREEN }, { name: "Evaluate", color: GREEN }, { name: "Evaluated", color: ORANGE }, { name: "Ready", color: BLUE }, { name: "In Progress", color: YELLOW }, { name: "Needs More Info", color: RED }, { name: "In Review", color: GRAY }, { name: "Failed Review", color: RED }, { name: "Dev Complete", color: PINK }, { name: "Merge Review", color: YELLOW }, { name: "Stage Ready", color: BLUE }, { name: "Done", color: PURPLE }]
+        }) {
+          projectV2Field {
+            ... on ProjectV2SingleSelectField {
+              id
+              name
+            }
+          }
+        }
+      }
+    '
+gh: Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+
+    ⚠ Could not create field Priority: Command failed: gh api graphql -f query='
+      mutation {
+        createProjectV2Field(input: {
+          projectId: "PVT_kwDOBW_6Ns4BLNnw"
+          dataType: SINGLE_SELECT
+          name: "Priority"
+          singleSelectOptions: [{ name: "🔴 Critical", color: GRAY }, { name: "🟠 High", color: GRAY }, { name: "🟡 Medium", color: GRAY }, { name: "🟢 Low", color: GRAY }]
+        }) {
+          projectV2Field {
+            ... on ProjectV2SingleSelectField {
+              id
+              name
+            }
+          }
+        }
+      }
+    '
+gh: Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+
+    ⚠ Could not create field Area: Command failed: gh api graphql -f query='
+      mutation {
+        createProjectV2Field(input: {
+          projectId: "PVT_kwDOBW_6Ns4BLNnw"
+          dataType: SINGLE_SELECT
+          name: "Area"
+          singleSelectOptions: [{ name: "🎨 Frontend", color: GRAY }, { name: "⚙️ Backend", color: GRAY }, { name: "📹 WebRTC", color: GRAY }, { name: "☁️ Infrastructure", color: GRAY }, { name: "🗄️ Database", color: GRAY }, { name: "🚀 DevOps", color: GRAY }, { name: "📚 Documentation", color: GRAY }]
+        }) {
+          projectV2Field {
+            ... on ProjectV2SingleSelectField {
+              id
+              name
+            }
+          }
+        }
+      }
+    '
+gh: Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+
+    ⚠ Could not create field Size: Command failed: gh api graphql -f query='
+      mutation {
+        createProjectV2Field(input: {
+          projectId: "PVT_kwDOBW_6Ns4BLNnw"
+          dataType: SINGLE_SELECT
+          name: "Size"
+          singleSelectOptions: [{ name: "XS", color: GRAY }, { name: "S", color: GRAY }, { name: "M", color: GRAY }, { name: "L", color: GRAY }, { name: "XL", color: GRAY }]
+        }) {
+          projectV2Field {
+            ... on ProjectV2SingleSelectField {
+              id
+              name
+            }
+          }
+        }
+      }
+    '
+gh: Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+
+    ⚠ Could not create field Work Type: Command failed: gh api graphql -f query='
+      mutation {
+        createProjectV2Field(input: {
+          projectId: "PVT_kwDOBW_6Ns4BLNnw"
+          dataType: SINGLE_SELECT
+          name: "Work Type"
+          singleSelectOptions: [{ name: "✨ Feature", color: GRAY }, { name: "🐛 Bug", color: GRAY }, { name: "🔧 Enhancement", color: GRAY }, { name: "♻️ Refactor", color: GRAY }, { name: "📝 Docs", color: GRAY }, { name: "🧹 Chore", color: GRAY }]
+        }) {
+          projectV2Field {
+            ... on ProjectV2SingleSelectField {
+              id
+              name
+            }
+          }
+        }
+      }
+    '
+gh: Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+
+    ⚠ Could not create field Complexity: Command failed: gh api graphql -f query='
+      mutation {
+        createProjectV2Field(input: {
+          projectId: "PVT_kwDOBW_6Ns4BLNnw"
+          dataType: SINGLE_SELECT
+          name: "Complexity"
+          singleSelectOptions: [{ name: "Low", color: GRAY }, { name: "Medium", color: GRAY }, { name: "High", color: GRAY }]
+        }) {
+          projectV2Field {
+            ... on ProjectV2SingleSelectField {
+              id
+              name
+            }
+          }
+        }
+      }
+    '
+gh: Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+
+    ⚠ Could not create field Impact: Command failed: gh api graphql -f query='
+      mutation {
+        createProjectV2Field(input: {
+          projectId: "PVT_kwDOBW_6Ns4BLNnw"
+          dataType: SINGLE_SELECT
+          name: "Impact"
+          singleSelectOptions: [{ name: "Low", color: GRAY }, { name: "Medium", color: GRAY }, { name: "High", color: GRAY }, { name: "Critical", color: GRAY }]
+        }) {
+          projectV2Field {
+            ... on ProjectV2SingleSelectField {
+              id
+              name
+            }
+          }
+        }
+      }
+    '
+gh: Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+Argument 'description' on InputObject 'ProjectV2SingleSelectFieldOptionInput' is required. Expected type String!
+
+    ⚠ Could not create field Epic: Command failed: gh api graphql -f query='
+      mutation {
+        createProjectV2Field(input: {
+          projectId: "PVT_kwDOBW_6Ns4BLNnw"
+          dataType: SINGLE_SELECT
+          name: "Epic"
+          singleSelectOptions: []
+        }) {
+          projectV2Field {
+            ... on ProjectV2SingleSelectField {
+              id
+              name
+            }
+          }
+        }
+      }
+    '
+gh: At least one singleSelectOption is required for data_type SINGLE_SELECT.
+
+    ✓ Created field: Assigned Instance
+    ✓ Created field: Effort
+✓ Created project: Status Monitoring Subsystem (status.irable.com) (#12)
+  https://github.com/orgs/stokedconsulting/projects/12
+
+🔗 Linking project to repository...
+✓ Project linked to repository
+
+📝 Creating 28 issues for "Status Monitoring Subsystem (status.irable.com)"...
+
+.  Creating "Epic" text field in project...
+  ✓ Created "Epic" field
+  Creating "Phase" text field in project...
+  ✓ Created "Phase" field
+    ✗ Failed to create issue: Error: Field "Work Type" not found in project
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Field "Work Type" not found in project
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Field "Work Type" not found in project
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Field "Work Type" not found in project
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Field "Work Type" not found in project
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+.    ✗ Failed to create issue: Error: Status option "Ready" not found in project. Please add it to the Status field options.
+
+
+✅ Project "Status Monitoring Subsystem (status.irable.com)" created with 28 issues!
+
+
+💡 Next steps:
+  • Run `auto project list-ready` to see ready items
+  • Run `auto project start "Status Monitoring Subsystem (status.irable.com)"` to begin autonomous work
+  • View project: https://github.com/orgs/stokedconsulting/projects/12

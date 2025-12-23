@@ -1,10 +1,11 @@
 /**
- * Assignment tracking types for autonomous-assignments.json
+ * Assignment tracking types for in-memory assignment management
  *
- * SYNC STRATEGY:
- * - Local fields: Process state, timestamps, worktree info (source of truth here)
- * - Synced fields: Status (read from project, written back on changes)
- * - Project fields: Priority, labels, sprint (read from project, never cached here)
+ * ARCHITECTURE CHANGE:
+ * - Assignments are stored in-memory only (no JSON file persistence)
+ * - GitHub Projects is the source of truth
+ * - Assignment data is derived from GitHub Projects on startup
+ * - Process state (PIDs, worktrees) is ephemeral and tracked in-memory
  */
 
 export type AssignmentStatus =
@@ -79,15 +80,6 @@ export interface Assignment {
     estimatedComplexity?: 'low' | 'medium' | 'high';
     isPhaseMaster?: boolean; // True if this is a phase master coordinating sub-items
   };
-}
-
-export interface AssignmentsFile {
-  version: string;
-  projectName: string;
-  projectPath: string;
-  createdAt: string;
-  updatedAt: string;
-  assignments: Assignment[];
 }
 
 export interface CreateAssignmentInput {

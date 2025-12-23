@@ -46,7 +46,6 @@ export class MigrationManager {
         // Files to migrate from root to .autonomous/
         const filesToMigrate = [
           '.autonomous-config.json',
-          'autonomous-assignments.json',
         ];
 
         for (const filename of filesToMigrate) {
@@ -98,8 +97,8 @@ export class MigrationManager {
         const stats = await fs.stat(filePath);
         if (stats.isDirectory()) continue;
 
-        // Skip config and assignments files
-        if (file === '.autonomous-config.json' || file === 'autonomous-assignments.json') {
+        // Skip config file
+        if (file === '.autonomous-config.json') {
           continue;
         }
 

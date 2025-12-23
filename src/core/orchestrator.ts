@@ -24,7 +24,7 @@ import { promises as fs } from 'fs';
 import { join, dirname, basename } from 'path';
 import chalk from 'chalk';
 import { isProcessRunning, isZombieProcess } from '../utils/process.js';
-import { detectSessionCompletion, extractPRNumber } from '../utils/session-analyzer.js';
+import { detectSessionCompletion, extractPRNumber, detectAutonomousSignals } from '../utils/session-analyzer.js';
 
 export class Orchestrator {
   private configManager: ConfigManager;
@@ -1397,24 +1397,84 @@ export class Orchestrator {
 
       // Check if process is actually running
       if (status.processId && !isProcessRunning(status.processId)) {
-        // Process has exited - check for completion indicators FIRST before treating as dead
+        // Process has exited - check for completion signals and indicators
         const logPath = join(this.autonomousDataDir, `output-${assignment.llmInstanceId}.log`);
+
+        // PRIMARY: Check for explicit autonomous signals (most reliable)
+        const autonomousSignals = detectAutonomousSignals(logPath);
+
+        // SECONDARY: Pattern-based session analysis (fallback)
         const sessionAnalysis = detectSessionCompletion(logPath);
 
         // For phase masters, PR creation is a strong completion signal
         const isPhaseMaster = assignment.metadata?.isPhaseMaster === true;
-        const prNumber = extractPRNumber(logPath);
+        const prNumber = autonomousSignals.prNumber || extractPRNumber(logPath);
         const hasPR = prNumber !== undefined;
 
-        if (sessionAnalysis.isComplete || (isPhaseMaster && hasPR)) {
+        // Handle explicit BLOCKED signal - needs human intervention
+        if (autonomousSignals.isBlocked) {
+          console.log(chalk.yellow(`\n⏸️  Session blocked for issue #${assignment.issueNumber}`));
+          console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
+          console.log(chalk.gray(`   Reason: ${autonomousSignals.blockedReason || 'No reason provided'}`));
+
+          // Post comment to GitHub about blocked status
+          if (this.githubAPI) {
+            try {
+              await this.githubAPI.createComment(assignment.issueNumber,
+                `## ⏸️ Autonomous Work Blocked\n\n**Reason:** ${autonomousSignals.blockedReason || 'Needs human clarification'}\n\nPlease provide additional context or guidance in the issue comments, then change status back to "In Progress" to resume.`
+              );
+            } catch (error) {
+              if (this.verbose) {
+                console.log(chalk.yellow(`   ⚠️  Could not post comment: ${error}`));
+              }
+            }
+          }
+
+          // Update to a blocked status (keep as in-progress but clear instance)
+          await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
+          return; // Don't resurrect
+        }
+
+        // Handle explicit FAILED signal - work couldn't be completed
+        if (autonomousSignals.isFailed) {
+          console.log(chalk.red(`\n❌ Session failed for issue #${assignment.issueNumber}`));
+          console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
+          console.log(chalk.gray(`   Reason: ${autonomousSignals.failedReason || 'No reason provided'}`));
+
+          // Post comment to GitHub about failure
+          if (this.githubAPI) {
+            try {
+              await this.githubAPI.createComment(assignment.issueNumber,
+                `## ❌ Autonomous Work Failed\n\n**Reason:** ${autonomousSignals.failedReason || 'Unrecoverable error'}\n\nManual intervention may be required.`
+              );
+            } catch (error) {
+              if (this.verbose) {
+                console.log(chalk.yellow(`   ⚠️  Could not post comment: ${error}`));
+              }
+            }
+          }
+
+          // Clear instance but don't resurrect
+          await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
+          return; // Don't resurrect
+        }
+
+        // Check for completion: explicit signal OR pattern matching OR (phase master + PR)
+        const isComplete = autonomousSignals.isComplete ||
+          sessionAnalysis.isComplete ||
+          (isPhaseMaster && hasPR);
+
+        if (isComplete) {
           // SUCCESS: Session completed normally
           console.log(chalk.green(`\n✓ Session completed successfully for issue #${assignment.issueNumber}`));
           console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
-          if (isPhaseMaster && hasPR) {
-            console.log(chalk.gray(`   Phase master with PR #${prNumber} created`));
-          }
-          if (sessionAnalysis.isComplete) {
-            console.log(chalk.gray(`   Found completion indicators: ${sessionAnalysis.indicators.slice(0, 3).join(', ')}`));
+
+          if (autonomousSignals.isComplete) {
+            console.log(chalk.gray(`   Detection: Explicit AUTONOMOUS_SIGNAL:COMPLETE`));
+          } else if (isPhaseMaster && hasPR) {
+            console.log(chalk.gray(`   Detection: Phase master with PR #${prNumber} created`));
+          } else if (sessionAnalysis.isComplete) {
+            console.log(chalk.gray(`   Detection: Pattern matching (${sessionAnalysis.indicators.slice(0, 3).join(', ')})`));
           }
 
           // Update assignment status to dev-complete
@@ -1429,7 +1489,7 @@ export class Orchestrator {
               if (!assignment.projectItemId) {
                 throw new Error('No projectItemId on assignment');
               }
-              
+
               const devCompleteStatus = 'Dev Complete';
               await this.projectsAPI.updateItemStatusByValue(
                 assignment.projectItemId,
@@ -1453,7 +1513,7 @@ export class Orchestrator {
           });
 
           if (prNumber) {
-            console.log(chalk.blue(`   PR created: ${prNumber}`));
+            console.log(chalk.blue(`   PR created: #${prNumber}`));
           }
         } else {
           // Before resurrecting, run AI review to check if work is actually complete
@@ -1799,24 +1859,48 @@ The autonomous system is resuming work on this issue. The LLM will address the r
 
         // Check if process is actually running FIRST (process check is more reliable than session file)
         if (status.processId && !isProcessRunning(status.processId)) {
-          // Process has exited - check for completion indicators FIRST before treating as dead
+          // Process has exited - check for completion signals and indicators
           const logPath = join(this.autonomousDataDir, `output-${assignment.llmInstanceId}.log`);
+
+          // PRIMARY: Check for explicit autonomous signals (most reliable)
+          const autonomousSignals = detectAutonomousSignals(logPath);
+
+          // SECONDARY: Pattern-based session analysis (fallback)
           const sessionAnalysis = detectSessionCompletion(logPath);
 
           // For phase masters, PR creation is a strong completion signal
           const isPhaseMaster = assignment.metadata?.isPhaseMaster === true;
-          const prNumber = extractPRNumber(logPath);
+          const prNumber = autonomousSignals.prNumber || extractPRNumber(logPath);
           const hasPR = prNumber !== undefined;
 
-          if (sessionAnalysis.isComplete || (isPhaseMaster && hasPR)) {
+          // Handle explicit BLOCKED or FAILED signals
+          if (autonomousSignals.isBlocked || autonomousSignals.isFailed) {
+            console.log(chalk.yellow(`\n⏸️  Session ended with ${autonomousSignals.isBlocked ? 'BLOCKED' : 'FAILED'} signal for issue #${assignment.issueNumber}`));
+            console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
+            console.log(chalk.gray(`   Reason: ${autonomousSignals.blockedReason || autonomousSignals.failedReason || 'Not specified'}`));
+
+            // Clear instance but don't resurrect
+            await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
+            skippedDueToCompletion++;
+            continue;
+          }
+
+          // Check for completion: explicit signal OR pattern matching OR (phase master + PR)
+          const isComplete = autonomousSignals.isComplete ||
+            sessionAnalysis.isComplete ||
+            (isPhaseMaster && hasPR);
+
+          if (isComplete) {
             // SUCCESS: Session completed normally, not a dead process
             console.log(chalk.green(`\n✓ Session completed successfully for issue #${assignment.issueNumber}`));
             console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
-            if (isPhaseMaster && hasPR) {
-              console.log(chalk.gray(`   Phase master with PR #${prNumber} created`));
-            }
-            if (sessionAnalysis.isComplete) {
-              console.log(chalk.gray(`   Found completion indicators: ${sessionAnalysis.indicators.slice(0, 3).join(', ')}`));
+
+            if (autonomousSignals.isComplete) {
+              console.log(chalk.gray(`   Detection: Explicit AUTONOMOUS_SIGNAL:COMPLETE`));
+            } else if (isPhaseMaster && hasPR) {
+              console.log(chalk.gray(`   Detection: Phase master with PR #${prNumber} created`));
+            } else if (sessionAnalysis.isComplete) {
+              console.log(chalk.gray(`   Detection: Pattern matching (${sessionAnalysis.indicators.slice(0, 3).join(', ')})`));
             }
 
             // Update assignment status to dev-complete
@@ -1831,7 +1915,7 @@ The autonomous system is resuming work on this issue. The LLM will address the r
                 if (!assignment.projectItemId) {
                   throw new Error('No projectItemId on assignment');
                 }
-                
+
                 const devCompleteStatus = 'Dev Complete';
                 await this.projectsAPI.updateItemStatusByValue(
                   assignment.projectItemId,

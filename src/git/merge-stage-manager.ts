@@ -30,16 +30,19 @@ export class MergeStageBranchManager {
   private stageBranch: string;
   private mergeStageBranch: string;
   private projectPath: string;
+  private mergeStageWorktreePath: string;
 
   constructor(projectPath: string, options: MergeStageBranchManagerOptions = {}) {
     this.projectPath = projectPath;
     this.mainBranch = options.mainBranch || 'main';
     this.stageBranch = options.stageBranch || 'stage';
     this.mergeStageBranch = options.mergeStageBranch || 'merge_stage';
+    this.mergeStageWorktreePath = `${projectPath}/.worktrees/${this.mergeStageBranch}`;
   }
 
   /**
    * Create or reset merge_stage branch from main
+   * Uses worktree instead of checkout to avoid switching branches in main repo
    */
   async createOrResetMergeStage(): Promise<void> {
     $.cwd = this.projectPath;
@@ -49,30 +52,30 @@ export class MergeStageBranchManager {
       // Fetch latest from remote
       await $`git fetch origin`;
 
-      // Check if merge_stage exists locally
-      const branches = await $`git branch --list ${this.mergeStageBranch}`;
-      const exists = branches.stdout.trim().length > 0;
+      // Remove existing merge_stage worktree if it exists
+      try {
+        await $`git worktree remove ${this.mergeStageWorktreePath} --force`;
+      } catch {
+        // Worktree might not exist, that's fine
+      }
 
-      if (exists) {
-        // Delete existing merge_stage
+      // Delete merge_stage branch if it exists (safe now that worktree is removed)
+      try {
         await $`git branch -D ${this.mergeStageBranch}`;
+      } catch {
+        // Branch might not exist, that's fine
       }
 
-      // Check if we're currently on merge_stage (shouldn't happen, but safe check)
-      const currentBranch = await $`git rev-parse --abbrev-ref HEAD`;
-      if (currentBranch.stdout.trim() === this.mergeStageBranch) {
-        // Switch away from merge_stage before deleting
-        await $`git checkout ${this.mainBranch}`;
-      }
+      // Update main branch (in main repo, no checkout needed)
+      await $`git fetch origin ${this.mainBranch}:${this.mainBranch}`;
 
-      // Update main branch
-      await $`git checkout ${this.mainBranch}`;
-      await $`git pull origin ${this.mainBranch}`;
+      // Create fresh merge_stage branch from main
+      await $`git branch ${this.mergeStageBranch} ${this.mainBranch}`;
 
-      // Create fresh merge_stage from main
-      await $`git checkout -b ${this.mergeStageBranch}`;
+      // Create worktree for merge_stage
+      await $`git worktree add ${this.mergeStageWorktreePath} ${this.mergeStageBranch}`;
 
-      console.log(chalk.green(`✓ Created fresh ${this.mergeStageBranch} from ${this.mainBranch}`));
+      console.log(chalk.green(`✓ Created fresh ${this.mergeStageBranch} worktree from ${this.mainBranch}`));
     } catch (error) {
       throw new Error(`Failed to create/reset merge_stage: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -80,23 +83,22 @@ export class MergeStageBranchManager {
 
   /**
    * Merge a feature branch into merge_stage
+   * Works in merge_stage worktree context
    */
   async mergeFeatureBranch(branchName: string, issueNumber: number): Promise<MergeResult> {
-    $.cwd = this.projectPath;
+    // Work in merge_stage worktree, not main repo
+    $.cwd = this.mergeStageWorktreePath;
     $.verbose = false;
 
     try {
-      // Ensure we're on merge_stage
-      const currentBranch = await $`git rev-parse --abbrev-ref HEAD`;
-      if (currentBranch.stdout.trim() !== this.mergeStageBranch) {
-        await $`git checkout ${this.mergeStageBranch}`;
-      }
-
-      // Fetch the feature branch
+      // Fetch the feature branch from main repo
       try {
         await $`git fetch origin ${branchName}`;
       } catch {
-        // Branch might only exist locally
+        // Branch might only exist locally in main repo
+        // Try to fetch from local refs
+        const mainRepoGitDir = `${this.projectPath}/.git`;
+        await $`git --git-dir=${mainRepoGitDir} fetch . ${branchName}:${branchName}`;
       }
 
       // Attempt merge with no-ff to preserve history
@@ -145,10 +147,10 @@ export class MergeStageBranchManager {
   }
 
   /**
-   * Detect if there are currently unresolved conflicts
+   * Check if there are unresolved conflicts in merge_stage worktree
    */
   async hasUnresolvedConflicts(): Promise<boolean> {
-    $.cwd = this.projectPath;
+    $.cwd = this.mergeStageWorktreePath;
     $.verbose = false;
 
     try {
@@ -161,10 +163,10 @@ export class MergeStageBranchManager {
   }
 
   /**
-   * Get list of files with conflicts
+   * Get list of files with unresolved conflicts in merge_stage worktree
    */
   async getConflictFiles(): Promise<string[]> {
-    $.cwd = this.projectPath;
+    $.cwd = this.mergeStageWorktreePath;
     $.verbose = false;
 
     try {
@@ -177,36 +179,35 @@ export class MergeStageBranchManager {
   }
 
   /**
-   * Abort current merge
+   * Abort current merge in merge_stage worktree
    */
   async abortMerge(): Promise<void> {
-    $.cwd = this.projectPath;
+    $.cwd = this.mergeStageWorktreePath;
     $.verbose = false;
 
     try {
       await $`git merge --abort`;
-    } catch (error) {
-      throw new Error(`Failed to abort merge: ${error instanceof Error ? error.message : String(error)}`);
+      console.log(chalk.yellow('⚠️  Merge aborted'));
+    } catch {
+      // No merge in progress
     }
   }
 
   /**
-   * Stage all resolved files and commit
+   * Commit resolved conflicts in merge_stage worktree
    */
-  async commitResolvedConflicts(message: string): Promise<string> {
-    $.cwd = this.projectPath;
+  async commitResolvedConflicts(message: string): Promise<void> {
+    $.cwd = this.mergeStageWorktreePath;
     $.verbose = false;
 
     try {
-      // Stage all files (conflicts should be resolved at this point)
+      // Add all resolved files
       await $`git add .`;
 
-      // Commit the merge
+      // Commit with provided message
       await $`git commit -m ${message}`;
 
-      // Get the commit SHA
-      const commitSha = await $`git rev-parse HEAD`;
-      return commitSha.stdout.trim();
+      console.log(chalk.green('✓ Committed resolved conflicts'));
     } catch (error) {
       throw new Error(`Failed to commit resolved conflicts: ${error instanceof Error ? error.message : String(error)}`);
     }
@@ -214,18 +215,13 @@ export class MergeStageBranchManager {
 
   /**
    * Force push merge_stage to stage branch
+   * Works from merge_stage worktree
    */
   async forcePushToStage(): Promise<string> {
-    $.cwd = this.projectPath;
+    $.cwd = this.mergeStageWorktreePath;
     $.verbose = false;
 
     try {
-      // Ensure we're on merge_stage
-      const currentBranch = await $`git rev-parse --abbrev-ref HEAD`;
-      if (currentBranch.stdout.trim() !== this.mergeStageBranch) {
-        throw new Error(`Not on ${this.mergeStageBranch} branch`);
-      }
-
       // Get current commit SHA for tagging
       const commitSha = await $`git rev-parse HEAD`;
       const sha = commitSha.stdout.trim();
@@ -249,8 +245,8 @@ export class MergeStageBranchManager {
   }
 
   /**
-   * Merge stage branch to main
-   * Used in epic mode with auto-merge to main enabled
+   * Merge stage branch to main branch
+   * Uses fetch/push operations without checking out branches in main repo
    */
   async mergeStageToMain(): Promise<MergeResult> {
     $.cwd = this.projectPath;
@@ -260,9 +256,24 @@ export class MergeStageBranchManager {
       // Fetch latest changes
       await $`git fetch origin`;
 
-      // Checkout and update main
-      await $`git checkout ${this.mainBranch}`;
-      await $`git pull origin ${this.mainBranch}`;
+      // Update local main branch without checking it out
+      await $`git fetch origin ${this.mainBranch}:${this.mainBranch}`;
+
+      // Create a temporary worktree for the merge operation
+      const tempWorktreePath = `${this.projectPath}/.worktrees/temp_main_merge`;
+      
+      try {
+        // Remove temp worktree if it exists from previous run
+        await $`git worktree remove ${tempWorktreePath} --force`;
+      } catch {
+        // Doesn't exist, that's fine
+      }
+
+      // Create temp worktree on main branch
+      await $`git worktree add ${tempWorktreePath} ${this.mainBranch}`;
+
+      // Set cwd to temp worktree
+      $.cwd = tempWorktreePath;
 
       // Attempt merge with no-ff to preserve history
       try {
@@ -279,6 +290,10 @@ export class MergeStageBranchManager {
         console.log(chalk.green(`✓ Merged ${this.stageBranch} to ${this.mainBranch}`));
         console.log(chalk.gray(`  Commit: ${sha.substring(0, 7)}`));
 
+        // Clean up temp worktree
+        $.cwd = this.projectPath;
+        await $`git worktree remove ${tempWorktreePath} --force`;
+
         return {
           success: true,
           hasConflicts: false,
@@ -288,6 +303,14 @@ export class MergeStageBranchManager {
         // Check if it's a merge conflict
         const status = await $`git status --porcelain`;
         const conflictLines = status.stdout.split('\n').filter(line => line.startsWith('UU '));
+
+        // Clean up temp worktree on error
+        $.cwd = this.projectPath;
+        try {
+          await $`git worktree remove ${tempWorktreePath} --force`;
+        } catch {
+          // Cleanup failed, not critical
+        }
 
         if (conflictLines.length > 0) {
           // Extract conflict file paths
@@ -308,6 +331,9 @@ export class MergeStageBranchManager {
         };
       }
     } catch (error) {
+      // Ensure we're back in main project path
+      $.cwd = this.projectPath;
+      
       return {
         success: false,
         hasConflicts: false,
@@ -343,22 +369,23 @@ export class MergeStageBranchManager {
   }
 
   /**
-   * Delete merge_stage branch (cleanup)
+   * Delete merge_stage branch and worktree
    */
   async deleteMergeStage(): Promise<void> {
     $.cwd = this.projectPath;
     $.verbose = false;
 
     try {
-      // Switch away from merge_stage if we're on it
-      const currentBranch = await $`git rev-parse --abbrev-ref HEAD`;
-      if (currentBranch.stdout.trim() === this.mergeStageBranch) {
-        await $`git checkout ${this.mainBranch}`;
+      // Remove worktree first
+      try {
+        await $`git worktree remove ${this.mergeStageWorktreePath} --force`;
+      } catch {
+        // Worktree might not exist, that's okay
       }
 
       // Delete local branch
       await $`git branch -D ${this.mergeStageBranch}`;
-      console.log(chalk.gray(`✓ Deleted local ${this.mergeStageBranch} branch`));
+      console.log(chalk.gray(`✓ Deleted local ${this.mergeStageBranch} branch and worktree`));
     } catch (error) {
       // Branch might not exist, that's okay
     }

@@ -132,7 +132,7 @@ async function init(options: InitOptions): Promise<void> {
               fields: {
                 status: {
                   fieldName: 'Status',
-                  readyValues: ['Todo', 'Ready', 'Evaluated'],
+                  readyValues: ['Todo', 'Ready', 'Evaluated', 'Failed Review'],
                   inProgressValue: 'In Progress',
                   reviewValue: 'In Review',
                   doneValue: 'Done',

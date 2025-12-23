@@ -412,12 +412,12 @@ FEEDBACK: [Your detailed feedback. If PASS, explain what you found that satisfie
     feedback: string;
     score?: number;
   } {
-    // Extract DECISION
-    const decisionMatch = response.match(/DECISION:\s*(PASS|FAIL)/i);
+    // Extract DECISION (handles optional Markdown bold: **PASS** or PASS)
+    const decisionMatch = response.match(/DECISION:\s*\*{0,2}(PASS|FAIL)\*{0,2}/i);
     const passed = decisionMatch ? decisionMatch[1].toUpperCase() === 'PASS' : false;
 
-    // Extract SCORE
-    const scoreMatch = response.match(/SCORE:\s*(\d+)/);
+    // Extract SCORE (handles optional Markdown bold: **9** or 9)
+    const scoreMatch = response.match(/SCORE:\s*\*{0,2}(\d+)\*{0,2}/);
     const score = scoreMatch ? parseInt(scoreMatch[1], 10) : undefined;
 
     // Extract FEEDBACK

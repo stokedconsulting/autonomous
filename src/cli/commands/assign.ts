@@ -189,7 +189,7 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
     // Set phase master flag in metadata
     if (isPhaseMaster && assignment.metadata) {
       assignment.metadata.isPhaseMaster = true;
-      await assignmentManager.save();
+      // No save needed - in-memory only
     }
 
     // Link assignment to project item if project integration enabled

@@ -94,13 +94,31 @@ export async function isGitRepository(cwd: string = process.cwd()): Promise<bool
 
 /**
  * Get the git repository root directory
+ * Handles both regular repositories and worktrees correctly
  */
 export async function getGitRoot(cwd: string = process.cwd()): Promise<string | null> {
   const originalVerbose = $.verbose;
   $.verbose = false; // Suppress command echoing
   try {
-    const result = await $`cd ${cwd} && git rev-parse --show-toplevel`;
-    return result.stdout.trim();
+    // Get the common git directory (handles worktrees)
+    const commonDirResult = await $`cd ${cwd} && git rev-parse --git-common-dir`;
+    const commonDir = commonDirResult.stdout.trim();
+
+    // If it's an absolute path to .git, get its parent directory
+    // Otherwise, resolve it relative to cwd and get parent
+    if (commonDir.endsWith('/.git')) {
+      return commonDir.replace(/\/\.git$/, '');
+    } else if (commonDir === '.git') {
+      // Regular repo, use show-toplevel
+      const result = await $`cd ${cwd} && git rev-parse --show-toplevel`;
+      return result.stdout.trim();
+    } else {
+      // Relative path to common dir (e.g., "../../.git")
+      const { dirname } = await import('path');
+      const { resolve } = await import('path');
+      const absoluteCommonDir = resolve(cwd, commonDir);
+      return dirname(absoluteCommonDir);
+    }
   } catch (error) {
     return null;
   } finally {

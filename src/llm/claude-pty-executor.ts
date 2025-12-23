@@ -8,6 +8,7 @@
 import * as pty from 'node-pty';
 import { EventEmitter } from 'events';
 import { createWriteStream, WriteStream } from 'fs';
+import { homedir } from 'os';
 
 export interface PTYExecutorOptions {
   promptText: string;
@@ -48,7 +49,8 @@ export class ClaudePTYExecutor extends EventEmitter {
 
     // Spawn Claude in PTY with terminal emulation
     // Prepare environment - exclude API key to force desktop mode
-    const { ANTHROPIC_API_KEY, ...cleanEnv } = process.env;
+    // Also remove CI flag which could disable interactive terminal features
+    const { ANTHROPIC_API_KEY, CI, ...cleanEnv } = process.env;
     
     this.ptyProcess = pty.spawn(claudePath, ['--dangerously-skip-permissions'], {
       name: 'xterm-256color',
@@ -59,8 +61,14 @@ export class ClaudePTYExecutor extends EventEmitter {
         ...cleanEnv,
         CLAUDE_INSTANCE_ID: instanceId,
         AUTONOMOUS_PARENT_PID: process.pid.toString(),
+        // Force terminal features for nested PTY environments
+        FORCE_COLOR: '1',
+        TERM: 'xterm-256color',
       },
     });
+
+    // Track output to detect full UI readiness
+    let outputBuffer = '';
 
     // Handle real-time output
     this.ptyProcess.onData((data: string) => {
@@ -76,30 +84,57 @@ export class ClaudePTYExecutor extends EventEmitter {
         process.stdout.write(data);
       }
 
-      // Detect when Claude is ready (shows working directory in banner)
-      if (!this.hasSentPrompt && data.includes(workingDirectory)) {
+      // Accumulate output for readiness detection
+      outputBuffer += data;
+      // Keep buffer from growing too large
+      if (outputBuffer.length > 10000) {
+        outputBuffer = outputBuffer.slice(-5000);
+      }
+
+      // Detect when Claude UI is fully ready
+      // Primary indicators: input prompt ">" or "bypass permissions" message
+      // Secondary: working directory in banner
+      const hasInputPrompt = outputBuffer.includes('> ') || outputBuffer.includes('>');
+      const hasBypassMessage = outputBuffer.includes('bypass permissions');
+      const tildeWorkingDir = workingDirectory.replace(homedir(), '~');
+      const hasWorkingDir = outputBuffer.includes(workingDirectory) || outputBuffer.includes(tildeWorkingDir);
+
+      // Need both: working directory shown AND input prompt ready
+      const isFullyReady = hasWorkingDir && (hasInputPrompt || hasBypassMessage);
+
+      if (!this.hasSentPrompt && isFullyReady) {
         this.hasSentPrompt = true;
 
-        // Wait for Ink UI to fully mount
+        // Wait for Ink UI to fully mount and stabilize
+        // Increased from 1000ms to 1500ms for reliability
         setTimeout(() => {
-          if (this.isActive) {
+          if (this.isActive && this.ptyProcess) {
             // Send the prompt text
             this.ptyProcess.write(promptText);
 
-            // Send Enter key (both newline and carriage return for compatibility)
+            // Send Enter key after a delay for paste to complete
+            // Increased from 250ms to 500ms for multi-line prompts
             setTimeout(() => {
-              if (this.isActive) {
-                this.ptyProcess.write('\x0D'); // Carriage return
+              if (this.isActive && this.ptyProcess) {
+                // Send carriage return to execute the command
+                this.ptyProcess.write('\r');
               }
-            }, 250);
+            }, 500);
           }
-        }, 1000);
+        }, 1500);
       }
     });
 
     // Handle exit
     return new Promise((resolve, reject) => {
       this.ptyProcess.onExit(({ exitCode, signal }: { exitCode: number; signal?: number }) => {
+        // Write session ended marker BEFORE cleanup closes the log stream
+        // This ensures detectSessionCompletion() can find the marker
+        if (this.logStream) {
+          const exitInfo = `\n\n=== Session Ended ===\nExit code: ${exitCode}\nSignal: ${signal}\nEnded: ${new Date().toISOString()}\n`;
+          this.logStream.write(exitInfo);
+        }
+
         this.cleanup();
 
         if (signal) {

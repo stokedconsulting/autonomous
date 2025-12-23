@@ -12,6 +12,7 @@ export interface CreateWorktreeOptions {
   baseDir: string;
   projectName: string;
   baseBranch?: string;
+  customPath?: string; // Override default path generation (for project-based worktrees)
 }
 
 export interface WorktreeInfo {
@@ -36,11 +37,12 @@ export class WorktreeManager {
    * Create a new worktree for an issue
    */
   async createWorktree(options: CreateWorktreeOptions): Promise<string> {
-    const { issueNumber, branchName, baseDir, projectName, baseBranch = 'main' } = options;
+    const { issueNumber, branchName, baseDir, projectName, baseBranch = 'main', customPath } = options;
 
-    // Generate worktree path
-    const worktreeName = `${projectName}-issue-${issueNumber}`;
-    const worktreePath = resolve(this.projectPath, baseDir, worktreeName);
+    // Generate worktree path (use customPath if provided, otherwise default naming)
+    const worktreePath = customPath
+      ? resolve(customPath)
+      : resolve(this.projectPath, baseDir, `${projectName}-issue-${issueNumber}`);
 
     // Check if directory exists on disk (regardless of git status)
     let directoryExists = false;

@@ -225,7 +225,7 @@ export class GitHubAPI {
   /**
    * Get all comments for an issue
    */
-  async getComments(issueNumber: number): Promise<Array<{ id: number; body: string; user: { login: string } }>> {
+  async getComments(issueNumber: number): Promise<Array<{ id: number; body: string; user: { login: string }; created_at: string }>> {
     const response = await this.octokit.issues.listComments({
       owner: this.owner,
       repo: this.repo,
@@ -238,6 +238,7 @@ export class GitHubAPI {
       user: {
         login: comment.user?.login || 'unknown',
       },
+      created_at: comment.created_at,
     }));
   }
 

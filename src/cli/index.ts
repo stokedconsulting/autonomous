@@ -21,6 +21,11 @@ import {
   projectSyncLabelsCommand,
   projectClearAssignmentsCommand,
   projectBackfillCommand,
+  projectListCommand,
+  projectStartCommand,
+  projectCreateCommand,
+  projectAddCommand,
+  projectReviewCommand,
 } from './commands/project.js';
 import { optimizeCommand } from './commands/optimize.js';
 import { itemCommand, itemLogCommand } from './commands/item.js';
@@ -30,11 +35,16 @@ import { clarifyCommand } from './commands/clarify.js';
 import { personaCommand } from './commands/persona.js';
 import { updateCommand } from './commands/update.js';
 import { epicCommand } from './commands/epic.js';
+import { uiCommand } from './commands/ui.js';
 import { readFileSync } from 'fs';
-import { join } from 'path';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+// ESM-compatible __dirname equivalent
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 // Import package.json for version (single source of truth)
-// Note: __dirname is available when compiled to CommonJS
 const packageJson = JSON.parse(
   readFileSync(join(__dirname, '../../package.json'), 'utf-8')
 );
@@ -200,6 +210,48 @@ project
   .option('-v, --verbose', 'Show detailed backfill progress')
   .action(projectBackfillCommand);
 
+project
+  .command('list')
+  .description('List all GitHub Projects linked to this repository')
+  .option('-v, --verbose', 'Show detailed information')
+  .action(projectListCommand);
+
+project
+  .command('create <description>')
+  .description('Create a NEW GitHub Project board from a description (generates phased plan with issues)')
+  .option('--review', 'Review and iterate on the plan before creating')
+  .option('--start', 'Start autonomous work immediately after creating the project')
+  .option('-v, --verbose', 'Show detailed output')
+  .action(projectCreateCommand);
+
+project
+  .command('add <description>')
+  .description('Add issues to an EXISTING GitHub Project from a description')
+  .requiredOption('--project <identifier>', 'Target project (number or name) to add issues to')
+  .option('--start', 'Start autonomous work immediately after adding issues')
+  .option('-v, --verbose', 'Show detailed output')
+  .action(projectAddCommand);
+
+project
+  .command('start <project-name>')
+  .description('Start autonomous work on a project (picks first ready item, or use --item)')
+  .option('--item <number>', 'Work on a specific item number', parseInt)
+  .option('--dry-run', 'Preview what would happen without starting Claude')
+  .option('--review', 'Create project from description first, review plan, then start (use with description instead of project-name)')
+  .option('-v, --verbose', 'Interactive UI with full issue titles and navigation')
+  .option('-i, --interactive', 'Same as --verbose: interactive UI mode')
+  .option('-p, --max-parallel <number>', 'Max parallel evaluations (default: 3)', parseInt)
+  .action(projectStartCommand);
+
+project
+  .command('review <project-identifier>')
+  .description('Review items in a project (default: "In Review" status, architect persona only)')
+  .option('--all', 'Review ALL items in the project, not just "In Review" status')
+  .option('--multi', 'Use all personas (architect, product-manager, senior-engineer, qa-engineer, security-engineer)')
+  .option('-p, --max-parallel <number>', 'Max parallel reviews (default: 3)', parseInt)
+  .option('-v, --verbose', 'Enable verbose output')
+  .action(projectReviewCommand);
+
 // Optimize command
 program
   .command('optimize <feature> [goal]')
@@ -286,6 +338,14 @@ program
 
 // Persona command
 program.addCommand(personaCommand);
+
+// UI command
+program
+  .command('ui')
+  .description('Launch the interactive terminal UI dashboard')
+  .option('-v, --view <view>', 'Initial view (status, orchestrator, project, review, config)', 'status')
+  .option('-p, --project-id <id>', 'Load a specific project by ID')
+  .action(uiCommand);
 
 // Handle unknown commands
 program.on('command:*', () => {

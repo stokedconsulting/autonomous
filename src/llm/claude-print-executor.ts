@@ -1,7 +1,7 @@
 /**
  * Claude Print Executor - Silent background execution
  *
- * Uses `claude -p` for non-interactive execution without terminal UI.
+ * Uses `claude --print` with stdin piping for non-interactive execution.
  * Ideal for background processing when real-time output isn't needed.
  */
 
@@ -22,6 +22,7 @@ export class ClaudePrintExecutor {
 
   /**
    * Start Claude in print mode (non-interactive, silent execution)
+   * Uses stdin piping to handle long prompts that exceed command-line limits
    */
   async start(options: PrintExecutorOptions): Promise<number> {
     const { promptText, workingDirectory, logFile, instanceId, claudePath = 'claude' } = options;
@@ -34,19 +35,26 @@ export class ClaudePrintExecutor {
       const header = `=== Claude Print Mode Session ===\nInstance ID: ${instanceId}\nWorking Directory: ${workingDirectory}\nStarted: ${new Date().toISOString()}\n\n`;
       this.logStream.write(header);
 
-      // Spawn Claude in print mode
-      this.child = spawn(claudePath, ['-p', promptText, '--dangerously-skip-permissions'], {
+      // Prepare environment - exclude API key to force desktop mode
+      const { ANTHROPIC_API_KEY, ...cleanEnv } = process.env;
+
+      // Spawn Claude with --print flag, prompt will be piped via stdin
+      this.child = spawn(claudePath, ['--print', '--dangerously-skip-permissions'], {
         cwd: workingDirectory,
         env: {
-          ...process.env,
+          ...cleanEnv,
           CLAUDE_INSTANCE_ID: instanceId,
           AUTONOMOUS_PARENT_PID: process.pid.toString(),
-          // Ensure desktop mode, not API mode
-          ANTHROPIC_API_KEY: undefined,
         },
         detached: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: ['pipe', 'pipe', 'pipe'],
       });
+
+      // Write prompt to stdin and close it
+      if (this.child.stdin) {
+        this.child.stdin.write(promptText);
+        this.child.stdin.end();
+      }
 
       // Pipe stdout/stderr to log file
       if (this.child.stdout) {

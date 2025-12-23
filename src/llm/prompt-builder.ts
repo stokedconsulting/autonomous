@@ -18,7 +18,46 @@ export interface PromptContext {
   requirementsRemaining?: string[];
 }
 
+/**
+ * Completion signal constants for deterministic detection
+ * These signals are output by Claude and parsed by the session analyzer
+ */
+export const AUTONOMOUS_SIGNALS = {
+  PREFIX: 'AUTONOMOUS_SIGNAL:',
+  COMPLETE: 'AUTONOMOUS_SIGNAL:COMPLETE',
+  BLOCKED: 'AUTONOMOUS_SIGNAL:BLOCKED:',
+  FAILED: 'AUTONOMOUS_SIGNAL:FAILED:',
+  PR: 'AUTONOMOUS_SIGNAL:PR:',
+} as const;
+
 export class PromptBuilder {
+  /**
+   * Generate completion signal instructions to append to prompts
+   * This instructs Claude to output deterministic markers for completion detection
+   */
+  private static getCompletionSignalInstructions(includeNoPR = false): string {
+    return `
+---
+IMPORTANT - Completion Signals:
+When you finish your work, you MUST output one of these signals on its own line:
+
+✅ If work is complete and successful:
+${AUTONOMOUS_SIGNALS.COMPLETE}
+
+📋 If you created a PR, also output (with actual number):
+${AUTONOMOUS_SIGNALS.PR}123
+
+🚫 If blocked and need human input:
+${AUTONOMOUS_SIGNALS.BLOCKED}description of what you need
+
+❌ If you encounter an unrecoverable error:
+${AUTONOMOUS_SIGNALS.FAILED}description of the failure
+${includeNoPR ? '\nNote: Do NOT create a PR - your branch will be merged by the phase master.' : ''}
+
+These signals are critical for the autonomous system to detect your completion status.
+---`;
+  }
+
   /**
    * Detect if an issue is a phase master based on title
    * Phase master detection:
@@ -83,16 +122,14 @@ Requirements:
 
 Your working directory is: ${worktreePath}
 
-When you complete a significant task or need guidance, stop and summarize your work.
-The autonomous system will analyze your progress and provide next steps.
-
 Begin by:
 1. Analyzing the issue requirements
 2. Reviewing the existing codebase
 3. Planning your implementation approach
 4. Starting with the most critical changes
 
-Start working on this issue now.`;
+Start working on this issue now.
+${this.getCompletionSignalInstructions()}`;
   }
 
   /**
@@ -133,7 +170,8 @@ Phase Master Workflow:
 - Run comprehensive tests to ensure integration is correct
 - Create PR only after all tests pass
 
-Start by checking git status and identifying which sub-item branches need to be merged.`;
+Start by checking git status and identifying which sub-item branches need to be merged.
+${this.getCompletionSignalInstructions()}`;
   }
 
   /**
@@ -169,7 +207,8 @@ Work Item Workflow:
 - Push changes to ${assignment.branchName}
 - The phase master will later merge your branch along with other work items
 
-Start by analyzing the requirements and implementing your specific task.`;
+Start by analyzing the requirements and implementing your specific task.
+${this.getCompletionSignalInstructions(true)}`;
   }
 
   /**
@@ -206,7 +245,8 @@ Requirements:
 - ${assignment.metadata?.requiresCI ? 'Push changes and ensure CI passes' : 'Push your changes'}
 - Create a pull request when ready
 
-Resume working on this issue now.`;
+Resume working on this issue now.
+${this.getCompletionSignalInstructions()}`;
 
     return prompt;
   }

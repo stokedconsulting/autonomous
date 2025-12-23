@@ -16,23 +16,31 @@ import {
   EpicPhase,
   EpicOrchestratorConfig,
 } from '../types/project.js';
+import { GitHubProjectsAPI } from '../github/projects-api.js';
+import { ProjectFieldMapper } from '../github/project-field-mapper.js';
 
 export class EpicOrchestrator {
   private octokit: Octokit;
   private owner: string;
   private repo: string;
   private config: EpicOrchestratorConfig;
+  private projectsAPI: GitHubProjectsAPI | null;
+  private fieldMapper: ProjectFieldMapper | null;
 
   constructor(
     octokit: Octokit,
     owner: string,
     repo: string,
-    config: EpicOrchestratorConfig
+    config: EpicOrchestratorConfig,
+    projectsAPI?: GitHubProjectsAPI,
+    fieldMapper?: ProjectFieldMapper
   ) {
     this.octokit = octokit;
     this.owner = owner;
     this.repo = repo;
     this.config = config;
+    this.projectsAPI = projectsAPI || null;
+    this.fieldMapper = fieldMapper || null;
   }
 
   /**
@@ -193,7 +201,7 @@ export class EpicOrchestrator {
 
     for (const item of phase.workItems) {
       const status = item.metadata.status?.toLowerCase();
-      if (status !== 'done' && status !== 'completed' && status !== 'dev-complete') {
+      if (status !== 'done' && status !== 'completed' && status !== 'dev complete') {
         return false;
       }
     }
@@ -278,16 +286,122 @@ export class EpicOrchestrator {
   }
 
   /**
+   * Query the project for ALL items in a given phase (ignoring status/epic filters)
+   * This ensures the project is the source of truth, not the filtered cache
+   * Uses pagination to fetch all items beyond the 100-item limit
+   */
+  private async getAllPhaseItemsFromProject(phaseName: string): Promise<ProjectItemWithMetadata[]> {
+    if (!this.projectsAPI || !this.fieldMapper) {
+      console.warn(chalk.yellow('  Warning: ProjectsAPI not available, cannot verify phase completion from project'));
+      return [];
+    }
+
+    try {
+      const allItems: ProjectItemWithMetadata[] = [];
+      let hasNextPage = true;
+      let cursor: string | undefined = undefined;
+      let pageCount = 0;
+
+      // Paginate through all project items
+      while (hasNextPage) {
+        pageCount++;
+        const result = await this.projectsAPI.queryItems({
+          limit: 100,
+          cursor: cursor
+        });
+
+        // Map to metadata
+        const pageItems = result.items.map(item => this.fieldMapper!.mapItemWithMetadata(item));
+        allItems.push(...pageItems);
+
+        // Check if there are more pages
+        hasNextPage = result.hasNextPage;
+        cursor = result.endCursor;
+
+        if (hasNextPage) {
+          console.log(chalk.gray(`    Fetched page ${pageCount} (${allItems.length} items so far)...`));
+        }
+      }
+
+      console.log(chalk.gray(`  📄 Fetched ${allItems.length} total items from project (${pageCount} page${pageCount > 1 ? 's' : ''})`));
+
+      // Filter to items in this phase AND this epic
+      return allItems.filter(item => {
+        // Check if item's phase matches (from Phase field or title)
+        let itemPhase = item.metadata.phase;
+
+        // Fallback: detect phase from title
+        if (!itemPhase) {
+          const phaseMatch = item.issueTitle.match(/\b[Pp]hase\s+(\d+)\b/);
+          if (phaseMatch) {
+            itemPhase = `Phase ${phaseMatch[1]}`;
+          }
+        }
+
+        // Must match phase name
+        if (itemPhase !== phaseName) {
+          return false;
+        }
+
+        // Must belong to this epic (use same logic as filterEpicItems)
+        if (item.metadata.epic === this.config.epicName) {
+          return true;
+        }
+
+        // Fallback: match by title containing epic name
+        if (item.issueTitle.toLowerCase().includes(this.config.epicName.toLowerCase())) {
+          return true;
+        }
+
+        return false;
+      });
+    } catch (error) {
+      console.warn(chalk.yellow(`  Warning: Failed to query project for phase items: ${error}`));
+      return [];
+    }
+  }
+
+  /**
    * Get assignable items for current phase (excludes master items)
    */
-  getAssignableItems(phase: EpicPhase): ProjectItemWithMetadata[] {
-    // Phase master is assignable only if all work items are complete
+  async getAssignableItems(phase: EpicPhase): Promise<ProjectItemWithMetadata[]> {
+    // CRITICAL: Query the project directly to find ALL items in this phase
+    // This ensures items with no status or missing Epic field are still considered
+    const allPhaseItemsFromProject = await this.getAllPhaseItemsFromProject(phase.phaseName);
+
+    if (allPhaseItemsFromProject.length > 0) {
+      console.log(chalk.gray(`  🔍 Project query found ${allPhaseItemsFromProject.length} total items in ${phase.phaseName}`));
+
+      // Check if ALL items in the phase (from project) are complete
+      const incompleteItems = allPhaseItemsFromProject.filter(item => {
+        const isMaster = this.isPhaseMaster(item);
+        if (isMaster) return false; // Don't count master in completion check
+
+        const status = item.metadata.status?.toLowerCase();
+        const isComplete = status === 'done' || status === 'completed' || status === 'dev complete';
+
+        if (!isComplete) {
+          console.log(chalk.yellow(`  ⚠️  Found incomplete item in project: #${item.issueNumber} "${item.issueTitle}" (status: ${status || 'undefined'})`));
+        }
+
+        return !isComplete;
+      });
+
+      if (incompleteItems.length > 0) {
+        console.log(chalk.yellow(`  ⚠️  Phase ${phase.phaseName} has ${incompleteItems.length} incomplete work items - master blocked`));
+        // Return the incomplete work items from the project query (includes items with undefined status)
+        return incompleteItems;
+      }
+    }
+
+    // Fallback to checking the filtered work items if project query failed
     const allWorkComplete = phase.workItems.every(item => {
       const status = item.metadata.status?.toLowerCase();
-      return status === 'done' || status === 'completed' || status === 'dev-complete';
+      return status === 'done' || status === 'completed' || status === 'dev complete';
     });
 
     if (allWorkComplete && phase.masterItem) {
+      console.log(chalk.green(`  ✓ All phase work complete (verified ${allPhaseItemsFromProject.length > 0 ? 'from project' : 'from cache'}) - master assignable`));
       // Work complete - only master is assignable
       return [phase.masterItem];
     } else {
@@ -334,9 +448,9 @@ export class EpicOrchestrator {
         return [];
       }
     }
-    
+
     // Get assignable items from current phase
-    const assignableItems = this.getAssignableItems(currentPhase);
+    const assignableItems = await this.getAssignableItems(currentPhase);
 
     console.log(chalk.gray(`  Assignable from phase: ${assignableItems.length} item(s)`));
     assignableItems.forEach(item => {

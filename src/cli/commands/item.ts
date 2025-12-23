@@ -72,7 +72,7 @@ export async function itemLogCommand(issueNumber: string, options: ItemOptions =
     }
 
     const autonomousDataDir = join(cwd, '.autonomous');
-    const logFile = join(autonomousDataDir, `output-${assignment.llmInstanceId}.log`);
+    const logFile = join(autonomousDataDir, 'logs', `output-${assignment.llmInstanceId}.log`);
 
     // Check if log file exists
     try {
@@ -122,7 +122,7 @@ export async function itemLogCommand(issueNumber: string, options: ItemOptions =
     // Monitor assignment status for completion
     const statusCheckInterval = setInterval(async () => {
       try {
-        await assignmentManager.load(); // Reload to get latest status
+        // In-memory assignments are always up-to-date
         const updatedAssignment = assignmentManager.getAllAssignments().find(a => a.issueNumber === issueNum);
 
         if (updatedAssignment && updatedAssignment.status !== assignment.status) {

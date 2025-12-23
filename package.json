@@ -2,6 +2,7 @@
   "name": "@stokedconsulting/autonomous",
   "version": "0.1.0",
   "description": "Autonomous LLM management CLI for coordinating Claude, Gemini, and Codex to work on GitHub issues",
+  "type": "module",
   "main": "dist/index.js",
   "bin": {
     "auto": "./dist/cli/index.js"
@@ -34,19 +35,25 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@inkjs/ui": "^2.0.0",
     "@octokit/rest": "^20.0.2",
+    "@pppp606/ink-chart": "^0.2.3",
     "chalk": "^5.3.0",
     "commander": "^11.1.0",
     "dotenv": "^16.3.1",
+    "ink": "^5.0.1",
     "node-pty": "^1.0.0",
     "ora": "^7.0.1",
     "playwright": "^1.56.1",
+    "react": "^18.3.1",
     "uuid": "^9.0.1",
     "winston": "^3.11.0",
+    "zustand": "^5.0.2",
     "zx": "^7.2.3"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",
+    "@types/react": "^18.3.0",
     "@types/uuid": "^9.0.7",
     "@typescript-eslint/eslint-plugin": "^6.13.0",
     "@typescript-eslint/parser": "^6.13.0",

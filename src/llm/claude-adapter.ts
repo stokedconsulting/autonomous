@@ -193,21 +193,23 @@ export class ClaudeAdapter implements LLMAdapter {
       };
     }
 
-    // Check if session has ended via hook
-    const sessionFile = join(this.getSubdirectory('sessions'), `session-${instanceId}.json`);
-    let sessionEnded = false;
     let lastActivity: string | undefined;
 
+    // Check for Stop signal - Claude finished responding and waiting for input
+    const stopSignalFile = join(this.autonomousDataDir, `stop-signal-${instanceId}.json`);
+    let hasStopSignal = false;
+
     try {
-      const sessionData = JSON.parse(await fs.readFile(sessionFile, 'utf-8'));
-      sessionEnded = true;
-      lastActivity = sessionData.lastActivity;
+      const stopData = JSON.parse(await fs.readFile(stopSignalFile, 'utf-8'));
+      hasStopSignal = true;
+      lastActivity = stopData.stoppedAt;
     } catch {
-      // No session end file yet - still running or hasn't started working
+      // No stop signal yet - Claude is still working
     }
 
-    // If session ended, mark as not running
-    if (sessionEnded) {
+    // If stop signal exists, Claude has finished responding
+    // Mark as not running so orchestrator processes completion
+    if (hasStopSignal) {
       return {
         instanceId,
         provider: 'claude',
@@ -240,7 +242,7 @@ export class ClaudeAdapter implements LLMAdapter {
     const processRunning = await isProcessRunning(instance.processId);
 
     if (!processRunning) {
-      // Process ended but hook didn't create session file
+      // Process ended but hook didn't create stop signal file
       return {
         instanceId,
         provider: 'claude',
@@ -270,24 +272,66 @@ export class ClaudeAdapter implements LLMAdapter {
 
   /**
    * Install hooks for Claude
+   * Uses Claude Code's hook system via settings.json
    */
   async installHooks(worktreePath: string, assignmentId: string): Promise<void> {
-    const hooksDir = join(worktreePath, '.claude', 'hooks');
+    const claudeDir = join(worktreePath, '.claude');
+    const hooksDir = join(claudeDir, 'hooks');
 
-    // Ensure hooks directory exists
+    // Ensure directories exist
     await fs.mkdir(hooksDir, { recursive: true });
 
-    // Create session-end hook
-    const sessionEndHook = this.generateSessionEndHook(assignmentId);
-    const sessionEndPath = join(hooksDir, 'autonomous-session-end.sh');
-    await fs.writeFile(sessionEndPath, sessionEndHook, 'utf-8');
-    await fs.chmod(sessionEndPath, 0o755);
+    // Create Stop hook script - fires when Claude finishes responding
+    const stopHook = this.generateStopHook(assignmentId);
+    const stopHookPath = join(hooksDir, 'autonomous-stop.sh');
+    await fs.writeFile(stopHookPath, stopHook, 'utf-8');
+    await fs.chmod(stopHookPath, 0o755);
 
-    // Create tool-use hook to track activity
+    // Create tool-use hook script to track activity
     const toolUseHook = this.generateToolUseHook(assignmentId);
-    const toolUsePath = join(hooksDir, 'on-tool-use.sh');
+    const toolUsePath = join(hooksDir, 'autonomous-tool-use.sh');
     await fs.writeFile(toolUsePath, toolUseHook, 'utf-8');
     await fs.chmod(toolUsePath, 0o755);
+
+    // Create or update settings.json to register hooks with Claude Code
+    const settingsPath = join(claudeDir, 'settings.json');
+    let settings: Record<string, any> = {};
+
+    try {
+      const existingSettings = await fs.readFile(settingsPath, 'utf-8');
+      settings = JSON.parse(existingSettings);
+    } catch {
+      // No existing settings
+    }
+
+    // Configure hooks in settings.json format
+    // Use empty string matcher to match all events
+    settings.hooks = {
+      Stop: [
+        {
+          matcher: '',
+          hooks: [
+            {
+              type: 'command',
+              command: stopHookPath,
+            },
+          ],
+        },
+      ],
+      PostToolUse: [
+        {
+          matcher: '',
+          hooks: [
+            {
+              type: 'command',
+              command: toolUsePath,
+            },
+          ],
+        },
+      ],
+    };
+
+    await fs.writeFile(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
   }
 
   /**
@@ -373,29 +417,36 @@ fi
   }
 
   /**
-   * Generate session end hook script
+   * Generate Stop hook script - fires when Claude finishes responding
+   * This is the key hook for autonomous operation
    */
-  private generateSessionEndHook(assignmentId: string): string {
+  private generateStopHook(assignmentId: string): string {
     return `#!/bin/bash
-# Autonomous session end hook
-# This hook is called when a Claude work session ends
+# Autonomous Stop hook - fires when Claude finishes responding
+# This signals that Claude has completed its response and is waiting for input
 
 ASSIGNMENT_ID="${assignmentId}"
 AUTONOMOUS_DATA_DIR="${this.autonomousDataDir}"
-SESSION_FILE="\${AUTONOMOUS_DATA_DIR}/session-\${CLAUDE_INSTANCE_ID:-unknown}.json"
+STOP_SIGNAL_FILE="\${AUTONOMOUS_DATA_DIR}/stop-signal-\${CLAUDE_INSTANCE_ID:-unknown}.json"
 
-# Create session data
-cat > "\$SESSION_FILE" <<EOF
+# Read hook input from stdin
+HOOK_INPUT=$(cat)
+
+# Extract stop_hook_active to prevent infinite loops
+STOP_HOOK_ACTIVE=$(echo "\$HOOK_INPUT" | grep -o '"stop_hook_active":[^,}]*' | cut -d':' -f2 | tr -d ' ')
+
+# Create stop signal file for the orchestrator to detect
+cat > "\$STOP_SIGNAL_FILE" <<EOF
 {
   "assignmentId": "\$ASSIGNMENT_ID",
-  "endedAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-  "lastActivity": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-  "summary": "Work session completed",
+  "stoppedAt": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "stopHookActive": \${STOP_HOOK_ACTIVE:-false},
   "workingDirectory": "$(pwd)"
 }
 EOF
 
-echo "Session data saved to \$SESSION_FILE"
+# Exit 0 to allow Claude to stop (orchestrator will kill process)
+exit 0
 `;
   }
 
@@ -432,6 +483,8 @@ echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") - Tool: \${TOOL_NAME:-unknown}" >> "\$ACT
       join(this.getSubdirectory('sessions'), `session-${instanceId}.json`),
       join(this.getSubdirectory('prompts'), `prompt-${instanceId}.txt`),
       join(this.getSubdirectory('logs'), `output-${instanceId}.log`),
+      join(this.autonomousDataDir, `stop-signal-${instanceId}.json`),
+      join(this.autonomousDataDir, `activity-${instanceId}.log`),
     ];
 
     for (const file of filesToCleanup) {

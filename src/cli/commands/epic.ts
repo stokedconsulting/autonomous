@@ -134,7 +134,7 @@ async function createEpicIssues(
 
       // Set type field for master items (single-select field)
       if (item.isMaster) {
-        await projectsAPI.updateItemFieldValue(projectItemId, 'Type', 'Epic');
+        await projectsAPI.updateItemFieldValue(projectItemId, 'Work Type', 'Phase Master');
       }
 
       // Set status to Ready

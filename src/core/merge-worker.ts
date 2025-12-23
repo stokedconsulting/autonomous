@@ -28,7 +28,6 @@ export interface MergeWorkerConfig {
   autoResolveConflicts?: boolean;
   evaluateValue?: string; // Status value to set when rejecting (e.g., "Evaluate")
   autoMergeToMain?: boolean; // Automatically merge stage to main (epic mode)
-  epicMode?: boolean; // Epic orchestration mode - only process phase masters
 }
 
 export class MergeWorker {
@@ -116,9 +115,10 @@ export class MergeWorker {
    */
   private async syncPhaseItemStatuses(
     masterAssignment: Assignment,
-    newStatus: 'stage-ready' | 'merged'
+    newStatus: 'stage-ready' | 'merged',
+    epicMode: boolean
   ): Promise<void> {
-    if (!this.config.epicMode) {
+    if (!epicMode) {
       return; // Only run in epic mode
     }
 
@@ -215,7 +215,7 @@ export class MergeWorker {
    * Process all dev-complete assignments
    * In epic mode, only processes phase master tickets
    */
-  async processDevCompleteItems(): Promise<void> {
+  async processDevCompleteItems(epicMode: boolean = false): Promise<void> {
     if (this.isRunning) {
       console.log(chalk.yellow('⚠️  Merge worker already running, skipping...'));
       return;
@@ -228,7 +228,7 @@ export class MergeWorker {
     }
 
     // Epic mode: Filter to only phase master tickets
-    if (this.config.epicMode) {
+    if (epicMode) {
       const allItems = devCompleteItems.length;
       devCompleteItems = devCompleteItems.filter(item => this.isPhaseMaster(item));
 
@@ -261,7 +261,7 @@ export class MergeWorker {
 
       // Process items one by one
       for (const assignment of devCompleteItems) {
-        await this.processItem(assignment);
+        await this.processItem(assignment, epicMode);
       }
 
       console.log(chalk.green.bold(`\n✓ Merge Worker Completed\n`));
@@ -275,7 +275,7 @@ export class MergeWorker {
   /**
    * Process a single dev-complete item
    */
-  private async processItem(assignment: Assignment): Promise<void> {
+  private async processItem(assignment: Assignment, epicMode: boolean): Promise<void> {
     console.log(chalk.cyan.bold(`\n━━━ Processing Issue #${assignment.issueNumber} ━━━`));
     console.log(chalk.cyan(`  Title: ${assignment.issueTitle}`));
     console.log(chalk.cyan(`  Branch: ${assignment.branchName}\n`));
@@ -316,10 +316,10 @@ export class MergeWorker {
             }
 
             // Commit the resolved conflicts
-            const commitSha = await this.branchManager.commitResolvedConflicts(
+            await this.branchManager.commitResolvedConflicts(
               `Merge ${assignment.branchName} (issue #${assignment.issueNumber}) - conflicts resolved`
             );
-            console.log(chalk.green(`  ✓ Conflicts resolved and committed: ${commitSha.substring(0, 7)}`));
+            console.log(chalk.green(`  ✓ Conflicts resolved and committed`));
           } else {
             // Manual conflict resolution required
             await this.rejectItem(
@@ -398,7 +398,7 @@ export class MergeWorker {
                 await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
 
                 // Epic mode: Sync all phase items to stage-ready
-                await this.syncPhaseItemStatuses(assignment, 'stage-ready');
+                await this.syncPhaseItemStatuses(assignment, 'stage-ready', epicMode);
 
                 this.logEvent('⚠️', `Approved but main conflicts: #${assignment.issueNumber}`, assignment.issueTitle || '');
                 console.log(chalk.yellow(`\n⚠️  Issue #${assignment.issueNumber} on stage, but failed to auto-merge to main due to conflicts`));
@@ -418,7 +418,7 @@ export class MergeWorker {
               await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
 
               // Epic mode: Sync all phase items to stage-ready
-              await this.syncPhaseItemStatuses(assignment, 'stage-ready');
+              await this.syncPhaseItemStatuses(assignment, 'stage-ready', epicMode);
 
               this.logEvent('⚠️', `Approved but main merge failed: #${assignment.issueNumber}`, mainMergeResult.error || '');
               console.log(chalk.yellow(`\n⚠️  Issue #${assignment.issueNumber} on stage, but failed to auto-merge to main: ${mainMergeResult.error}`));
@@ -436,7 +436,7 @@ export class MergeWorker {
           await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
 
           // Epic mode: Sync all phase items to merged
-          await this.syncPhaseItemStatuses(assignment, 'merged');
+          await this.syncPhaseItemStatuses(assignment, 'merged', epicMode);
 
           this.logEvent('✅', `Completed: #${assignment.issueNumber} → main`, assignment.issueTitle || '');
           if (this.verbose) {
@@ -450,7 +450,7 @@ export class MergeWorker {
           await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);
 
           // Epic mode: Sync all phase items to stage-ready
-          await this.syncPhaseItemStatuses(assignment, 'stage-ready');
+          await this.syncPhaseItemStatuses(assignment, 'stage-ready', epicMode);
 
           this.logEvent('✅', `Approved: #${assignment.issueNumber} → stage`, assignment.issueTitle || '');
           if (this.verbose) {

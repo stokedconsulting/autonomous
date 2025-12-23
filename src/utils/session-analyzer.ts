@@ -5,24 +5,154 @@
 import * as fs from 'fs';
 
 /**
+ * Autonomous signal constants - must match prompt-builder.ts
+ */
+const AUTONOMOUS_SIGNALS = {
+  PREFIX: 'AUTONOMOUS_SIGNAL:',
+  COMPLETE: 'AUTONOMOUS_SIGNAL:COMPLETE',
+  BLOCKED: 'AUTONOMOUS_SIGNAL:BLOCKED:',
+  FAILED: 'AUTONOMOUS_SIGNAL:FAILED:',
+  PR: 'AUTONOMOUS_SIGNAL:PR:',
+} as const;
+
+/**
+ * Result of detecting autonomous signals in session output
+ */
+export interface AutonomousSignalResult {
+  hasSignal: boolean;
+  isComplete: boolean;
+  isBlocked: boolean;
+  isFailed: boolean;
+  prNumber?: number;
+  blockedReason?: string;
+  failedReason?: string;
+}
+
+/**
+ * Detect deterministic autonomous signals in session log
+ * These are explicit signals output by Claude following our prompt instructions
+ * This is the PRIMARY completion detection method - more reliable than pattern matching
+ *
+ * @param logPath Path to the session log file
+ * @returns Parsed signal information
+ */
+export function detectAutonomousSignals(logPath: string): AutonomousSignalResult {
+  const result: AutonomousSignalResult = {
+    hasSignal: false,
+    isComplete: false,
+    isBlocked: false,
+    isFailed: false,
+  };
+
+  try {
+    if (!fs.existsSync(logPath)) {
+      return result;
+    }
+
+    const content = fs.readFileSync(logPath, 'utf-8');
+    const lines = content.split('\n');
+
+    // Scan lines for autonomous signals (check last 500 lines for efficiency)
+    const recentLines = lines.slice(-500);
+
+    for (const line of recentLines) {
+      const trimmedLine = line.trim();
+
+      // Check for COMPLETE signal
+      if (trimmedLine === AUTONOMOUS_SIGNALS.COMPLETE ||
+          trimmedLine.includes(AUTONOMOUS_SIGNALS.COMPLETE)) {
+        result.hasSignal = true;
+        result.isComplete = true;
+      }
+
+      // Check for PR signal - extract number
+      if (trimmedLine.startsWith(AUTONOMOUS_SIGNALS.PR) ||
+          trimmedLine.includes(AUTONOMOUS_SIGNALS.PR)) {
+        result.hasSignal = true;
+        const prMatch = trimmedLine.match(/AUTONOMOUS_SIGNAL:PR:(\d+)/);
+        if (prMatch) {
+          result.prNumber = parseInt(prMatch[1], 10);
+        }
+      }
+
+      // Check for BLOCKED signal - extract reason
+      if (trimmedLine.startsWith(AUTONOMOUS_SIGNALS.BLOCKED) ||
+          trimmedLine.includes(AUTONOMOUS_SIGNALS.BLOCKED)) {
+        result.hasSignal = true;
+        result.isBlocked = true;
+        const blockedMatch = trimmedLine.match(/AUTONOMOUS_SIGNAL:BLOCKED:(.+)/);
+        if (blockedMatch) {
+          result.blockedReason = blockedMatch[1].trim();
+        }
+      }
+
+      // Check for FAILED signal - extract reason
+      if (trimmedLine.startsWith(AUTONOMOUS_SIGNALS.FAILED) ||
+          trimmedLine.includes(AUTONOMOUS_SIGNALS.FAILED)) {
+        result.hasSignal = true;
+        result.isFailed = true;
+        const failedMatch = trimmedLine.match(/AUTONOMOUS_SIGNAL:FAILED:(.+)/);
+        if (failedMatch) {
+          result.failedReason = failedMatch[1].trim();
+        }
+      }
+    }
+  } catch (error) {
+    console.error(`Error detecting autonomous signals: ${error}`);
+  }
+
+  return result;
+}
+
+/**
  * Completion indicators that suggest work is done
+ * These patterns are matched against lowercase log content
  */
 const COMPLETION_INDICATORS = [
+  // PR creation patterns
   'pull request created',
   'pr created',
   'pr #\\d+ is (open|ready)',
+  'pr:\\s*https://github\\.com',  // PR: https://github.com/...
+  'github\\.com/[^/]+/[^/]+/pull/\\d+',  // Any GitHub PR URL
+
+  // Completion status patterns
   'work.*complete',
   'task.*complete',
   'phase.*complete',
   'documentation.*complete',
   'implementation.*complete',
+  'successfully implemented',
+  'implementation summary',
+
+  // Requirements/criteria patterns
   'all.*requirements.*met',
   'acceptance criteria.*met',
+  'acceptance criteria met',  // Simpler pattern
+  '\\|\\s*✅\\s*\\|',  // Table cells with checkmarks like "| ✅ |"
   '✅.*complete',
+  '✅ completed',
+  'status.*✅',
+
+  // Test/check patterns
+  'all.*tests.*pass',
+  'tests passing',
+  '\\d+.*tests.*passing',  // "96 tests passing"
+  'pre-push checks passed',
+  'all checks passed',
+  'lint.*pass',
+  'type-check.*pass',
+
+  // Review patterns
   'ready for review',
   'awaiting.*review',
   'merged to',
   'successfully merged',
+
+  // Files created/modified patterns (common in Claude summaries)
+  'files created',
+  'files modified',
+  'files created/modified',
 ];
 
 /**
@@ -72,14 +202,13 @@ export function detectSessionCompletion(
     // Check for "Session Ended" message
     const hasSessionEnded = /=== session ended ===/i.test(recentLines);
 
-    // Consider complete if:
-    // 1. Session has ended AND
-    // 2. Has completion indicators AND
-    // 3. No recent activity (session ended > maxAge ago is suspicious, might be crash)
+    // Consider complete if EITHER:
+    // A) Session has ended AND has completion indicators (primary path)
+    // B) Has completion indicators AND recent activity (session just finished, hook-based detection)
+    // The recent activity check ensures we're looking at fresh output, not stale logs
     const isComplete =
-      hasSessionEnded &&
-      foundIndicators.length > 0 &&
-      !hasRecentActivity;
+      (hasSessionEnded && foundIndicators.length > 0) ||
+      (foundIndicators.length > 0 && hasRecentActivity);
 
     return {
       isComplete,

@@ -36,7 +36,7 @@ export class ProjectFieldMapper {
       status: this.getFieldValue(fieldValues, this.config.fields.status.fieldName),
       priority: this.getFieldValue(fieldValues, this.config.fields.priority?.fieldName),
       size: this.getFieldValue(fieldValues, this.config.fields.size?.fieldName),
-      type: this.getFieldValue(fieldValues, 'Type') || this.getFieldValue(fieldValues, 'Issue Type'),
+      type: this.getFieldValue(fieldValues, 'Work Type') || this.getFieldValue(fieldValues, 'Type') || this.getFieldValue(fieldValues, 'Issue Type'),
       area: this.getFieldValue(fieldValues, 'Area'),
       sprint: this.getSprintValue(fieldValues, this.config.fields.sprint?.fieldName),
       blockedBy: this.getFieldValue(fieldValues, 'Blocked By'),

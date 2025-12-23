@@ -73,6 +73,11 @@ const REVERSE_STATUS_MAPPING: Record<string, AssignmentStatus> = {
   'Done': 'merged',                // Merged to main, completed
 };
 
+/**
+ * Export reverse mapping for use by AssignmentManager
+ */
+export { REVERSE_STATUS_MAPPING };
+
 export class GitHubProjectsAPI implements ProjectAPI {
   private projectId: string;
   private config: ProjectConfig;
@@ -214,40 +219,65 @@ export class GitHubProjectsAPI implements ProjectAPI {
 
   /**
    * Get project item ID for an issue
+   * Uses pagination to search through all items
    */
   async getProjectItemId(issueNumber: number): Promise<string | null> {
-    const query = `
-      query {
-        node(id: "${this.projectId}") {
-          ... on ProjectV2 {
-            items(first: 100) {
-              nodes {
-                id
-                content {
-                  ... on Issue {
-                    number
+    let hasNextPage = true;
+    let cursor: string | undefined = undefined;
+
+    while (hasNextPage) {
+      const afterClause: string = cursor ? `, after: "${cursor}"` : '';
+
+      const query: string = `
+        query {
+          node(id: "${this.projectId}") {
+            ... on ProjectV2 {
+              items(first: 100${afterClause}) {
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+                nodes {
+                  id
+                  content {
+                    ... on Issue {
+                      number
+                    }
                   }
                 }
               }
             }
           }
         }
-      }
-    `;
+      `;
 
-    const result = await this.graphql<{
-      node: {
-        items: {
-          nodes: Array<{
-            id: string;
-            content: { number?: number };
-          }>;
+      const result = await this.graphql<{
+        node: {
+          items: {
+            pageInfo: {
+              hasNextPage: boolean;
+              endCursor: string;
+            };
+            nodes: Array<{
+              id: string;
+              content: { number?: number };
+            }>;
+          };
         };
-      };
-    }>(query);
+      }>(query);
 
-    const item = result.node.items.nodes.find((i) => i.content?.number === issueNumber);
-    return item?.id || null;
+      // Check if issue is in this page
+      const item = result.node.items.nodes.find((i) => i.content?.number === issueNumber);
+      if (item) {
+        return item.id;
+      }
+
+      // Move to next page
+      hasNextPage = result.node.items.pageInfo.hasNextPage;
+      cursor = result.node.items.pageInfo.endCursor;
+    }
+
+    return null;
   }
 
   /**
@@ -385,45 +415,11 @@ export class GitHubProjectsAPI implements ProjectAPI {
   /**
    * Get project item ID for an issue number
    * Returns null if the issue is not in the project
+   *
+   * This method delegates to getProjectItemId() to ensure pagination is used.
    */
   async getProjectItemIdByIssue(issueNumber: number): Promise<string | null> {
-    const query = `
-      query {
-        node(id: "${this.projectId}") {
-          ... on ProjectV2 {
-            items(first: 100) {
-              nodes {
-                id
-                content {
-                  ... on Issue {
-                    number
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    `;
-
-    const result = await this.graphql<{
-      node: {
-        items: {
-          nodes: Array<{
-            id: string;
-            content: {
-              number: number;
-            } | null;
-          }>;
-        };
-      };
-    }>(query);
-
-    const item = result.node.items.nodes.find(
-      (node) => node.content && node.content.number === issueNumber
-    );
-
-    return item?.id || null;
+    return this.getProjectItemId(issueNumber);
   }
 
   /**
@@ -576,8 +572,38 @@ export class GitHubProjectsAPI implements ProjectAPI {
   }
 
   /**
+   * Get ALL items from the project with pagination
+   * Fetches all pages automatically
+   * Public method for use by Orchestrator and other components
+   */
+  async getAllItems(filters?: {
+    status?: string[];
+    includeNoStatus?: boolean;
+  }): Promise<ProjectItem[]> {
+    const allItems: ProjectItem[] = [];
+    let hasNextPage = true;
+    let cursor: string | undefined = undefined;
+
+    while (hasNextPage) {
+      const result = await this.queryItems({
+        ...filters,
+        limit: 100,
+        cursor,
+      });
+
+      allItems.push(...result.items);
+      hasNextPage = result.hasNextPage;
+      cursor = result.endCursor;
+    }
+
+    return allItems;
+  }
+
+  /**
    * Get all "ready" items (based on config)
-   * Includes items with status: Ready, Todo, and Evaluated
+   * Includes items with status: Ready, Todo, Evaluated, Failed Review, and NO STATUS
+   * Items with no status are considered ready to start
+   * Paginates through ALL items to ensure nothing is missed
    */
   async getReadyItems(): Promise<ProjectItem[]> {
     const readyStatuses = [
@@ -585,28 +611,27 @@ export class GitHubProjectsAPI implements ProjectAPI {
       this.config.fields.status.evaluatedValue,
     ];
 
-    const result = await this.queryItems({
+    return this.getAllItems({
       status: readyStatuses,
+      includeNoStatus: true, // Items with no status are ready to start
     });
-
-    return result.items;
   }
 
   /**
    * Get items in a specific sprint/iteration
+   * Paginates through ALL items to ensure complete sprint coverage
    */
   async getItemsBySprint(sprintTitle: string): Promise<ProjectItem[]> {
-    const result = await this.queryItems({
-      limit: 100,
-    });
-
-    // Filter by sprint field
     const sprintFieldName = this.config.fields.sprint?.fieldName;
     if (!sprintFieldName) {
       return [];
     }
 
-    return result.items.filter(item => {
+    // Get ALL items with pagination
+    const allItems = await this.getAllItems();
+
+    // Filter by sprint field
+    return allItems.filter(item => {
       const sprint = item.fieldValues[sprintFieldName];
       return sprint && sprint.title === sprintTitle;
     });
@@ -626,20 +651,20 @@ export class GitHubProjectsAPI implements ProjectAPI {
 
   /**
    * Get all sprints/iterations in the project
+   * Paginates through ALL items to discover all sprints
    */
   async getAllSprints(): Promise<Array<{id: string, title: string, startDate: string, duration?: number}>> {
-    const result = await this.queryItems({
-      limit: 100,
-    });
-
     const sprintFieldName = this.config.fields.sprint?.fieldName;
     if (!sprintFieldName) {
       return [];
     }
 
+    // Get ALL items with pagination
+    const allItems = await this.getAllItems();
+
     // Extract unique sprints
     const sprintsMap = new Map<string, any>();
-    result.items.forEach(item => {
+    allItems.forEach(item => {
       const sprint = item.fieldValues[sprintFieldName];
       if (sprint && sprint.id) {
         sprintsMap.set(sprint.id, sprint);
@@ -744,6 +769,58 @@ export class GitHubProjectsAPI implements ProjectAPI {
   }
 
   /**
+   * Ensure a text field exists in the project, creating it if necessary
+   */
+  async ensureTextField(fieldName: string): Promise<string> {
+    // Check if field already exists
+    const existingFieldId = await this.getFieldId(fieldName);
+    if (existingFieldId) {
+      return existingFieldId;
+    }
+
+    // Create the field
+    console.log(`  Creating "${fieldName}" text field in project...`);
+    const mutation = `
+      mutation {
+        createProjectV2Field(input: {
+          projectId: "${this.projectId}"
+          dataType: TEXT
+          name: "${fieldName}"
+        }) {
+          projectV2Field {
+            ... on ProjectV2Field {
+              id
+              name
+            }
+          }
+        }
+      }
+    `;
+
+    const result = await this.graphql<{
+      createProjectV2Field: {
+        projectV2Field: {
+          id: string;
+          name: string;
+        };
+      };
+    }>(mutation);
+
+    const newFieldId = result.createProjectV2Field.projectV2Field.id;
+
+    // Update caches
+    this.fieldIdCache.set(fieldName, newFieldId);
+    this.fieldCache.set(fieldName, {
+      id: newFieldId,
+      name: fieldName,
+      dataType: 'TEXT',
+    });
+
+    console.log(`  ✓ Created "${fieldName}" field`);
+    return newFieldId;
+  }
+
+  /**
    * Update a text field value
    */
   async updateItemTextField(
@@ -751,10 +828,11 @@ export class GitHubProjectsAPI implements ProjectAPI {
     fieldName: string,
     value: string | null
   ): Promise<void> {
-    const fieldId = await this.getFieldId(fieldName);
+    // Ensure field exists before trying to update
+    const fieldId = await this.ensureTextField(fieldName);
 
     if (!fieldId) {
-      throw new Error(`Field "${fieldName}" not found in project`);
+      throw new Error(`Field "${fieldName}" not found in project and could not be created`);
     }
 
     const mutation = `
@@ -1320,6 +1398,7 @@ export class GitHubProjectsAPI implements ProjectAPI {
    * Clear all stale "Assigned Instance" values for items in pre-assignment statuses
    * Pre-assignment statuses are: Todo, Ready, Evaluated
    * These items should NEVER have an Assigned Instance set
+   * Paginates through ALL items to ensure complete cleanup
    */
   async clearStaleAssignments(): Promise<{ cleared: number; errors: number }> {
     const assignedInstanceFieldName = this.config.fields.assignedInstance?.fieldName;
@@ -1327,17 +1406,16 @@ export class GitHubProjectsAPI implements ProjectAPI {
       throw new Error('Assigned Instance field not configured');
     }
 
-    // Get all items with pre-assignment statuses
+    // Get ALL items with pre-assignment statuses (with pagination)
     const preAssignmentStatuses = this.config.fields.status.readyValues;
-    const result = await this.queryItems({
+    const items = await this.getAllItems({
       status: preAssignmentStatuses,
-      limit: 100,
     });
 
     let cleared = 0;
     let errors = 0;
 
-    for (const item of result.items) {
+    for (const item of items) {
       try {
         const assignedInstance = await this.getItemFieldValue(item.id, assignedInstanceFieldName);
 
