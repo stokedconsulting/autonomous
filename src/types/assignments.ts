@@ -32,7 +32,9 @@ export interface Assignment {
   issueNumber: number;
   issueTitle: string;
   issueBody?: string;
+  issueUrl?: string; // GitHub issue URL for easy reference and fetching
   projectItemId?: string;  // NEW: Link to GitHub Projects v2 item (enables sync)
+  projectNumber?: number;  // GitHub Project number this issue belongs to (enables multi-project support)
 
   // Process State (LOCAL - autonomous-specific)
   llmProvider: LLMProvider;
@@ -79,6 +81,8 @@ export interface Assignment {
     requiresCI: boolean;
     estimatedComplexity?: 'low' | 'medium' | 'high';
     isPhaseMaster?: boolean; // True if this is a phase master coordinating sub-items
+    failedReviewFeedback?: string; // Latest failed review feedback to fix
+    failedReviewAt?: string;       // Timestamp of the latest failed review
   };
 }
 
@@ -86,9 +90,11 @@ export interface CreateAssignmentInput {
   issueNumber: number;
   issueTitle: string;
   issueBody?: string;
+  issueUrl?: string; // GitHub issue URL for easy reference and fetching
   llmProvider: LLMProvider;
   worktreePath: string;
   branchName: string;
+  projectNumber?: number; // GitHub Project number this issue belongs to
   requiresTests?: boolean;
   requiresCI?: boolean;
   // NOTE: labels removed - read from GitHub/project instead

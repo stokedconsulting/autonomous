@@ -52,13 +52,18 @@ export class ClaudePTYExecutor extends EventEmitter {
     // Spawn Claude in PTY with terminal emulation
     // Prepare environment - exclude API key to force desktop mode
     // Also remove CI flag which could disable interactive terminal features
-    const { ANTHROPIC_API_KEY, CI, ...cleanEnv } = process.env;
+    const { ANTHROPIC_API_KEY: _ANTHROPIC_API_KEY, CI: _CI, ...cleanEnv } = process.env;
     
     const args = claudeArgs && claudeArgs.length > 0
       ? claudeArgs
       : ['--dangerously-skip-permissions'];
 
-    this.ptyProcess = pty.spawn(claudePath, args, {
+    // PTY spawn needs shell to execute bash wrappers
+    // Use shell to execute the command to handle script wrappers properly
+    const shell = process.env.SHELL || '/bin/bash';
+    const commandLine = `${claudePath} ${args.map(arg => `"${arg}"`).join(' ')}`;
+
+    this.ptyProcess = pty.spawn(shell, ['-l', '-c', commandLine], {
       name: 'xterm-256color',
       cols,
       rows,

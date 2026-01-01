@@ -49,8 +49,8 @@ export class MergeStageBranchManager {
     $.verbose = false;
 
     try {
-      // Fetch latest from remote
-      await $`git fetch origin`;
+      // Fetch latest from remote (safe even when main is checked out)
+      await $`git fetch origin ${this.mainBranch}`;
 
       // Remove existing merge_stage worktree if it exists
       try {
@@ -66,11 +66,8 @@ export class MergeStageBranchManager {
         // Branch might not exist, that's fine
       }
 
-      // Update main branch (in main repo, no checkout needed)
-      await $`git fetch origin ${this.mainBranch}:${this.mainBranch}`;
-
-      // Create fresh merge_stage branch from main
-      await $`git branch ${this.mergeStageBranch} ${this.mainBranch}`;
+      // Create fresh merge_stage branch from origin/main (doesn't require updating local main)
+      await $`git branch ${this.mergeStageBranch} origin/${this.mainBranch}`;
 
       // Create worktree for merge_stage
       await $`git worktree add ${this.mergeStageWorktreePath} ${this.mergeStageBranch}`;

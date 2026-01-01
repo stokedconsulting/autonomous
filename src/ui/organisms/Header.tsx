@@ -4,20 +4,11 @@
 
 import React from 'react';
 import { Box, Text } from 'ink';
-import { useUIStore, ViewType } from '../stores/ui-store.js';
+import { useUIStore } from '../stores/ui-store.js';
 import { Hotkey } from '../atoms/Hotkey.js';
-
-const VIEW_LABELS: Record<ViewType, string> = {
-  'status': 'Status Dashboard',
-  'orchestrator': 'LLM Orchestrator',
-  'project': 'Project Browser',
-  'review': 'Review Queue',
-  'config': 'Configuration',
-  'help': 'Help',
-};
+import { TabBar } from '../molecules/TabBar.js';
 
 export function Header(): React.ReactElement {
-  const currentView = useUIStore((s) => s.currentView);
   const breadcrumbs = useUIStore((s) => s.breadcrumbs);
 
   return (
@@ -31,8 +22,6 @@ export function Header(): React.ReactElement {
       <Box justifyContent="space-between">
         <Box>
           <Text bold color="cyan">◆ AUTONOMOUS</Text>
-          <Text color="gray"> │ </Text>
-          <Text color="white">{VIEW_LABELS[currentView]}</Text>
         </Box>
         <Box gap={2}>
           <Hotkey keys="?" label="help" />
@@ -40,9 +29,14 @@ export function Header(): React.ReactElement {
         </Box>
       </Box>
 
-      {/* Breadcrumbs */}
+      {/* Tab Bar */}
+      <Box marginTop={1}>
+        <TabBar />
+      </Box>
+
+      {/* Breadcrumbs - only show when navigating within a tab */}
       {breadcrumbs.length > 0 && (
-        <Box marginTop={0}>
+        <Box marginTop={1}>
           <Text dimColor>
             {breadcrumbs.map((crumb, i) => (
               <React.Fragment key={i}>

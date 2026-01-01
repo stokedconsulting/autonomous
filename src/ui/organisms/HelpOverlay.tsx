@@ -26,13 +26,12 @@ const KEY_GROUPS: KeyGroup[] = [
     ],
   },
   {
-    title: 'Views',
+    title: 'Tabs',
     keys: [
-      { key: '1', description: 'Status Dashboard' },
-      { key: '2', description: 'LLM Orchestrator' },
-      { key: '3', description: 'Project Browser' },
-      { key: '4', description: 'Review Queue' },
-      { key: '5', description: 'Configuration' },
+      { key: '1', description: 'Status Tab' },
+      { key: '2', description: 'Projects Tab' },
+      { key: '3', description: 'Orchestrator Tab' },
+      { key: 'c', description: 'Configuration' },
     ],
   },
   {

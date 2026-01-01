@@ -5,20 +5,28 @@
 import { render } from 'ink';
 import { App } from './App.js';
 import type { ViewType } from './stores/ui-store.js';
+import type { SetupOptions } from './pages/SetupPage.js';
 
 export interface RenderOptions {
   initialView?: ViewType;
   projectId?: string;
+  showHelp?: boolean;
+  setupOptions?: SetupOptions;
 }
 
 /**
  * Render the Ink UI application
  */
 export function renderUI(options: RenderOptions = {}): void {
-  const { initialView = 'status', projectId } = options;
+  const { initialView = 'project', projectId, showHelp, setupOptions } = options;
 
   const { waitUntilExit } = render(
-    <App initialView={initialView} projectId={projectId} />
+    <App
+      initialView={initialView}
+      projectId={projectId}
+      showHelp={showHelp}
+      setupOptions={setupOptions}
+    />
   );
 
   // Handle cleanup on exit
@@ -31,10 +39,15 @@ export function renderUI(options: RenderOptions = {}): void {
  * Create an Ink instance for testing or custom control
  */
 export function createInkInstance(options: RenderOptions = {}) {
-  const { initialView = 'status', projectId } = options;
+  const { initialView = 'project', projectId, showHelp, setupOptions } = options;
 
   return render(
-    <App initialView={initialView} projectId={projectId} />
+    <App
+      initialView={initialView}
+      projectId={projectId}
+      showHelp={showHelp}
+      setupOptions={setupOptions}
+    />
   );
 }
 

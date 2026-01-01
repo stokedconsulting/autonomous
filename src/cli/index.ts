@@ -12,7 +12,6 @@ import { configCommand } from './commands/config.js';
 import { pushCommand } from './commands/push.js';
 import { assignCommand } from './commands/assign.js';
 import { unassignCommand } from './commands/unassign.js';
-import { setupCommand } from './commands/setup.js';
 import { evaluateCommand } from './commands/evaluate.js';
 import {
   projectInitCommand,
@@ -26,6 +25,7 @@ import {
   projectCreateCommand,
   projectAddCommand,
   projectReviewCommand,
+  projectDesignCommand,
 } from './commands/project.js';
 import { optimizeCommand } from './commands/optimize.js';
 import { itemCommand, itemLogCommand } from './commands/item.js';
@@ -35,7 +35,6 @@ import { clarifyCommand } from './commands/clarify.js';
 import { personaCommand } from './commands/persona.js';
 import { updateCommand } from './commands/update.js';
 import { epicCommand } from './commands/epic.js';
-import { uiCommand } from './commands/ui.js';
 import { readFileSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -56,7 +55,6 @@ program
   .name('autonomous')
   .description('Orchestrate multiple LLM instances to autonomously work on GitHub issues')
   .version(VERSION)
-  .showHelpAfterError()
   .configureHelp({
     sortSubcommands: true,
   });
@@ -67,6 +65,7 @@ program
   .description('Start autonomous mode and begin processing issues')
   .option('-d, --dry-run', 'Simulate without actually starting LLMs')
   .option('-v, --verbose', 'Enable verbose logging')
+  .option('--no-ui', 'Disable interactive Ink UI (use console output instead)')
   .option('--epic <name>', 'Only process items from specified epic (phased execution)')
   .option('-mm, --merge-main', 'Auto-merge to main after review (with --epic)')
   .action(startCommand);
@@ -108,6 +107,7 @@ config
   .option('--cli-args <args>', 'Additional CLI arguments (e.g., "--debug hooks")')
   .option('--api-key <key>', 'API key for the LLM')
   .option('--max-concurrent <number>', 'Maximum concurrent issues', parseInt)
+  .option('--concurrent <number>', 'Number to start initially (default: 1, must be <= max-concurrent)', parseInt)
   .option('--enable-hooks', 'Enable hooks support')
   .action(configCommand.addLLM);
 
@@ -118,6 +118,7 @@ config
   .option('--cli-args <args>', 'Additional CLI arguments (e.g., "--yolo")')
   .option('--api-key <key>', 'API key for the LLM')
   .option('--max-concurrent <number>', 'Maximum concurrent issues', parseInt)
+  .option('--concurrent <number>', 'Number to start initially (default: 1, must be <= max-concurrent)', parseInt)
   .option('--enable-hooks', 'Enable hooks support')
   .action(configCommand.useLLM);
 
@@ -163,7 +164,21 @@ program
   .description('Check and install dependencies for autonomous commands')
   .option('--install-all', 'Install all optional dependencies without prompting')
   .option('--skip-prompts', 'Skip all prompts')
-  .action(setupCommand);
+  .action(async (options) => {
+    try {
+      const { renderUI } = await import('../ui/index.js');
+      renderUI({
+        initialView: 'setup',
+        setupOptions: {
+          installAll: options.installAll,
+          skipPrompts: options.skipPrompts,
+        },
+      });
+    } catch (error: unknown) {
+      console.error('Error launching setup UI:', error instanceof Error ? error.message : String(error));
+      process.exit(1);
+    }
+  });
 
 // Evaluate command
 program
@@ -225,15 +240,25 @@ project
   .command('list')
   .description('List all GitHub Projects linked to this repository')
   .option('-v, --verbose', 'Show detailed information')
+  .option('-a, --all', 'Show all projects including those marked as [Done]')
   .action(projectListCommand);
 
 project
-  .command('create <description>')
+  .command('create [description...]')
   .description('Create a NEW GitHub Project board from a description (generates phased plan with issues)')
   .option('--review', 'Review and iterate on the plan before creating')
+  .option('--reviewed', 'Two-stage review workflow: PM strategy → Engineering plan (with Ink UI)')
   .option('--start', 'Start autonomous work immediately after creating the project')
   .option('-v, --verbose', 'Show detailed output')
-  .action(projectCreateCommand);
+  .action((description: string[], options: any) => {
+    // Join all description parts into a single string
+    const fullDescription = description.join(' ');
+    if (!fullDescription.trim()) {
+      console.error('Error: description is required');
+      process.exit(1);
+    }
+    return projectCreateCommand(fullDescription, options);
+  });
 
 project
   .command('add <description>')
@@ -249,10 +274,11 @@ project
   .option('--item <number>', 'Work on a specific item number', parseInt)
   .option('--dry-run', 'Preview what would happen without starting the LLM')
   .option('--review', 'Create project from description first, review plan, then start (use with description instead of project-name)')
-  .option('-v, --verbose', 'Interactive UI with full issue titles and navigation')
-  .option('-i, --interactive', 'Same as --verbose: interactive UI mode')
-  .option('-p, --max-parallel <number>', 'Max parallel evaluations (default: 3)', parseInt)
+  .option('-v, --verbose', 'Verbose logging (Ink UI is now default)')
+  .option('-i, --interactive', 'Force Ink UI mode (default when terminal is interactive)')
+  .option('-p, --max-parallel <number>', 'Max parallel evaluations (default: 1)', parseInt)
   .option('--provider <provider>', 'LLM provider to use (claude, gemini, codex)')
+  .option('--no-ui', 'Disable Ink UI and use legacy text output')
   .action(projectStartCommand);
 
 project
@@ -263,6 +289,18 @@ project
   .option('-p, --max-parallel <number>', 'Max parallel reviews (default: 3)', parseInt)
   .option('-v, --verbose', 'Enable verbose output')
   .action(projectReviewCommand);
+
+project
+  .command('design [project-number] <description>')
+  .description('Design or modify a GitHub Project using Claude with /sc:design directive')
+  .option('-i, --interactive', 'Interactive mode')
+  .option('-v, --verbose', 'Enable verbose output')
+  .action((projectNumberOrDescription: string, descriptionOrOptions?: string, options?: any) => {
+    // Handle both command signatures:
+    // design <description> [options]
+    // design <number> <description> [options]
+    projectDesignCommand(projectNumberOrDescription, descriptionOrOptions, options);
+  });
 
 // Optimize command
 program
@@ -351,14 +389,6 @@ program
 // Persona command
 program.addCommand(personaCommand);
 
-// UI command
-program
-  .command('ui')
-  .description('Launch the interactive terminal UI dashboard')
-  .option('-v, --view <view>', 'Initial view (status, orchestrator, project, review, config)', 'status')
-  .option('-p, --project-id <id>', 'Load a specific project by ID')
-  .action(uiCommand);
-
 // Handle unknown commands
 program.on('command:*', () => {
   console.error(`\nError: Unknown command '${program.args.join(' ')}'`);
@@ -366,11 +396,12 @@ program.on('command:*', () => {
   process.exit(1);
 });
 
-// Show help if no command provided
-if (!process.argv.slice(2).length) {
-  program.outputHelp();
-  process.exit(0);
-}
+const cliArgs = process.argv.slice(2);
+const shouldLaunchUI = cliArgs.length === 0 && process.stdout.isTTY;
 
-// Parse arguments
-program.parse();
+if (shouldLaunchUI) {
+  const { renderUI } = await import('../ui/index.js');
+  renderUI({ showHelp: false }); // Let App.tsx smart default logic decide initial tab
+} else {
+  program.parse();
+}

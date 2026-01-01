@@ -1,14 +1,16 @@
 /**
- * Assignment Manager - In-Memory Assignment Management
+ * Assignment Manager - Hybrid Assignment Management
  *
- * ARCHITECTURE CHANGE:
- * - Assignments are stored in-memory only (no JSON file persistence)
- * - GitHub Projects is the source of truth
- * - Assignment data is derived from GitHub Projects on startup
+ * ARCHITECTURE:
+ * - Assignments are persisted to local JSON file AND synced to GitHub
+ * - Local file enables assignments to survive orchestrator restarts
+ * - GitHub Projects is the source of truth for active work status
  * - Process state (PIDs, worktrees) is ephemeral and tracked in-memory
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import { promises as fs } from 'fs';
+import { join } from 'path';
 import {
   Assignment,
   CreateAssignmentInput,
@@ -48,18 +50,61 @@ export class AssignmentManager {
   private assignments: Assignment[] = [];
   private projectAPI?: ProjectAPI;
   private logger: Logger;
+  private assignmentsFilePath: string;
+  private projectPath: string;
 
-  constructor(_projectPath: string, options?: { projectAPI?: ProjectAPI; logger?: Logger }) {
+  constructor(projectPath: string, options?: { projectAPI?: ProjectAPI; logger?: Logger }) {
+    this.projectPath = projectPath;
     this.projectAPI = options?.projectAPI;
     this.logger = options?.logger || defaultLogger;
+    this.assignmentsFilePath = join(projectPath, '.autonomous', 'assignments.json');
   }
 
   /**
-   * Initialize the assignment manager
-   * No longer loads from file - assignments are in-memory only
+   * Initialize the assignment manager and load assignments from file
    */
   async initialize(projectName: string, _projectPath: string): Promise<void> {
-    this.logger.info(`Initialized AssignmentManager for project: ${projectName}`);
+    await this.loadAssignments();
+    this.logger.info(`Initialized AssignmentManager for project: ${projectName} (loaded ${this.assignments.length} assignments)`);
+  }
+
+  /**
+   * Load assignments from file
+   */
+  private async loadAssignments(): Promise<void> {
+    try {
+      const data = await fs.readFile(this.assignmentsFilePath, 'utf-8');
+      this.assignments = JSON.parse(data);
+      this.logger.info(`Loaded ${this.assignments.length} assignments from ${this.assignmentsFilePath}`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        // File doesn't exist yet - that's fine
+        this.assignments = [];
+        this.logger.info('No existing assignments file found - starting fresh');
+      } else {
+        this.logger.error(`Failed to load assignments: ${error instanceof Error ? error.message : String(error)}`);
+        this.assignments = [];
+      }
+    }
+  }
+
+  /**
+   * Save assignments to file
+   */
+  private async saveAssignments(): Promise<void> {
+    try {
+      // Ensure .autonomous directory exists
+      await fs.mkdir(join(this.projectPath, '.autonomous'), { recursive: true });
+
+      // Save assignments
+      await fs.writeFile(
+        this.assignmentsFilePath,
+        JSON.stringify(this.assignments, null, 2),
+        'utf-8'
+      );
+    } catch (error) {
+      this.logger.error(`Failed to save assignments: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }
 
   /**
@@ -71,11 +116,13 @@ export class AssignmentManager {
       issueNumber: input.issueNumber,
       issueTitle: input.issueTitle,
       issueBody: input.issueBody,
+      issueUrl: input.issueUrl,
       llmProvider: input.llmProvider,
       llmInstanceId: `${input.llmProvider}-${uuidv4().slice(0, 8)}`,
       status: 'assigned',
       worktreePath: input.worktreePath,
       branchName: input.branchName,
+      projectNumber: input.projectNumber, // Store project number with assignment
       assignedAt: new Date().toISOString(),
       workSessions: [],
       metadata: {
@@ -86,6 +133,7 @@ export class AssignmentManager {
     };
 
     this.assignments.push(assignment);
+    await this.saveAssignments();
     return assignment;
   }
 
@@ -163,6 +211,8 @@ export class AssignmentManager {
     } else {
       assignment.lastActivity = new Date().toISOString();
     }
+
+    await this.saveAssignments();
   }
 
   /**
@@ -182,6 +232,7 @@ export class AssignmentManager {
     });
 
     assignment.lastActivity = new Date().toISOString();
+    await this.saveAssignments();
   }
 
   /**
@@ -207,6 +258,7 @@ export class AssignmentManager {
     if (update.promptUsed !== undefined) lastSession.promptUsed = update.promptUsed;
 
     assignment.lastActivity = new Date().toISOString();
+    await this.saveAssignments();
   }
 
   /**
@@ -219,19 +271,29 @@ export class AssignmentManager {
     }
 
     this.assignments.splice(index, 1);
+    await this.saveAssignments();
   }
 
   /**
-   * Get count of active assignments (assigned or in-progress)
+   * Get count of active assignments (actually running with processId)
    * NOTE: This trusts the local in-memory state and does NOT sync from GitHub.
    * Use syncStatusFromGitHub() separately if you need to detect manual status changes.
    */
   async getActiveAssignmentsCount(provider: LLMProvider): Promise<number> {
-    // Count in-memory assignments
+    // Count only assignments that are actively consuming LLM capacity
+    // Exclude dev-complete (waiting for merge), stage-ready, and merged (done)
+    // Note: Use != instead of !== to match both null and undefined
     const localCount = this.assignments.filter(
-      (a) => a.llmProvider === provider && (a.status === 'assigned' || a.status === 'in-progress')
+      (a) => a.llmProvider === provider &&
+             a.processId != null &&
+             a.status !== 'dev-complete' &&
+             a.status !== 'stage-ready' &&
+             a.status !== 'merged'
     ).length;
 
+    // TEMPORARILY DISABLED: GitHub check can be out of sync with local state
+    // TODO: Fix by clearing "Assigned Instance" field when stopping or resetting assignments
+    /*
     // If we have ProjectsAPI, also check GitHub for items with assigned instances
     // This handles cases where local cache is out of sync (e.g., deleted)
     if (this.projectAPI && this.projectAPI.getAllItems) {
@@ -260,6 +322,7 @@ export class AssignmentManager {
         return localCount;
       }
     }
+    */
 
     return localCount;
   }

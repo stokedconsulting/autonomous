@@ -108,6 +108,8 @@ export const AUTONOMOUS_PROJECT_TEMPLATE: {
         { name: '♻️ Refactor', color: 'GRAY' },
         { name: '📝 Docs', color: 'GRAY' },
         { name: '🧹 Chore', color: 'GRAY' },
+        { name: 'Phase Master', color: 'BLUE' },
+        { name: 'Phase Work Item', color: 'GREEN' },
       ],
     },
     // Complexity field

@@ -50,7 +50,7 @@ function parseDesignOutput(designText: string, epicName: string): PhaseItem[] {
     });
 
     // Extract work items from phase content
-    const workPattern = /(?:^|\n)(?:###?\s*)?(?:Phase\s*\d+\.)?(\d+)[\.\)]\s*(.+?)(?:\n|$)/gi;
+    const workPattern = /(?:^|\n)(?:###?\s*)?(?:Phase\s*\d+\.)?(\d+)[.)]\s*(.+?)(?:\n|$)/gi;
     let workMatch;
     let workNumber = 1;
 
@@ -188,19 +188,20 @@ export async function createEpicCommand(epicRequirements: string, options: EpicC
 
     const octokit = new Octokit({ auth: token });
 
-    // Resolve project ID from project number
-    const { resolveProjectId } = await import('../../github/project-resolver.js');
-    const projectId = await resolveProjectId(
-      config.github.owner,
-      config.github.repo,
-      false // don't show messages
-    );
+    // Discover projects from repository (multi-project support)
+    const { ProjectDiscovery } = await import('../../github/project-discovery.js');
+    const discovery = new ProjectDiscovery(config.github.owner, config.github.repo);
+    const projects = await discovery.getLinkedProjects();
 
-    if (!projectId) {
-      throw new Error('Could not resolve project ID');
+    if (projects.length === 0) {
+      throw new Error('No projects linked to this repository');
     }
 
-    const projectsAPI = new GitHubProjectsAPI(projectId, config.project);
+    // Use first project (or could prompt user to select)
+    const targetProject = projects[0];
+    console.log(chalk.green(`✓ Using project: ${targetProject.title} (#${targetProject.number})`));
+
+    const projectsAPI = new GitHubProjectsAPI(targetProject.id, config.project);
 
     // Step 1: Generate design or load from file
     let designText: string;
@@ -254,7 +255,7 @@ Description and details...`;
       config.github.owner,
       config.github.repo,
       projectsAPI,
-      config.project.projectNumber!
+      targetProject.number
     );
 
   } catch (error) {
@@ -266,7 +267,11 @@ Description and details...`;
 /**
  * Main epic command handler
  */
-export async function epicCommand(subcommand: string, args: string[], options: any): Promise<void> {
+export async function epicCommand(
+  subcommand: string,
+  args: string[],
+  options: Partial<EpicCreateOptions>
+): Promise<void> {
   if (subcommand === 'create') {
     const epicRequirements = args.join(' ');
 
@@ -282,7 +287,7 @@ export async function epicCommand(subcommand: string, args: string[], options: a
       process.exit(1);
     }
 
-    await createEpicCommand(epicRequirements, options);
+    await createEpicCommand(epicRequirements, options as EpicCreateOptions);
   } else {
     console.error(chalk.red(`\n✗ Unknown subcommand: ${subcommand}`));
     console.log(chalk.yellow('\nAvailable subcommands:'));

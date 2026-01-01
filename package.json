@@ -52,6 +52,7 @@
     "zx": "^7.2.3"
   },
   "devDependencies": {
+    "@types/glob": "^8.1.0",
     "@types/node": "^20.10.0",
     "@types/react": "^18.3.0",
     "@types/uuid": "^9.0.7",

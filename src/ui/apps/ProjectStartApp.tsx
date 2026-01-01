@@ -7,12 +7,14 @@
  * - Interactive navigation (arrow keys, Enter for details, Escape to return)
  * - Real-time progress tracking
  *
- * Usage: auto project start <identifier> [--verbose]
+ * Usage: auto project start <identifier> [--no-ui] [--verbose]
+ * Ink UI is enabled by default when the terminal is interactive.
  */
 
 import React, { useState, useEffect, useCallback, useMemo, memo, useRef } from 'react';
-import { Box, Text, useApp, useInput } from 'ink';
+import { Box, Text, useInput } from 'ink';
 import { Spinner } from '@inkjs/ui';
+import { CommandUI, useCommandUI } from '../components/CommandUI.js';
 import { ConfigManager } from '../../core/config-manager.js';
 import { ProjectConfig } from '../../types/config.js';
 import { AssignmentManager } from '../../core/assignment-manager.js';
@@ -30,11 +32,12 @@ import { resolveLLMProvider } from '../../utils/llm-provider.js';
 import { LLMProvider } from '../../types/assignments.js';
 import { basename, join } from 'path';
 import { promises as fs } from 'fs';
+import { getLatestFailedReviewFeedback } from '../../utils/review-feedback.js';
 
 export interface ProjectStartAppProps {
   projectIdentifier: string;
   verbose?: boolean;
-  maxParallel?: number;  // Max concurrent evaluations (default: 3)
+  maxParallel?: number;  // Max concurrent evaluations (default: 1)
   dryRun?: boolean;
   provider?: string;
 }
@@ -48,6 +51,7 @@ interface WorkItem {
   prNumber?: number;
   errorMessage?: string;
   projectItemId?: string;
+  projectStatus?: string;
 }
 
 interface IssueDetails {
@@ -71,9 +75,10 @@ type AppPhase = 'loading' | 'ready' | 'working' | 'complete' | 'error';
 interface WorkItemRowProps {
   item: WorkItem;
   isSelected: boolean;
+  showSpinner: boolean;
 }
 
-const WorkItemRow = memo(function WorkItemRow({ item, isSelected }: WorkItemRowProps) {
+const WorkItemRow = memo(function WorkItemRow({ item, isSelected, showSpinner }: WorkItemRowProps) {
   let statusIcon: string;
   let statusColor: string;
 
@@ -116,7 +121,7 @@ const WorkItemRow = memo(function WorkItemRow({ item, isSelected }: WorkItemRowP
       </Text>
       {(item.status === 'working' || item.status === 'evaluating') && (
         <>
-          <Spinner />
+          {showSpinner && <Spinner />}
           {item.progress && <Text dimColor>{item.progress}</Text>}
         </>
       )}
@@ -133,11 +138,11 @@ const WorkItemRow = memo(function WorkItemRow({ item, isSelected }: WorkItemRowP
 export function ProjectStartApp({
   projectIdentifier,
   verbose = false,
-  maxParallel = 3,
+  maxParallel = 1,
   dryRun = false,
   provider,
 }: ProjectStartAppProps): React.ReactElement {
-  const { exit } = useApp();
+  const { exit, isInteractive, isQuietMode } = useCommandUI();
 
   // State
   const [phase, setPhase] = useState<AppPhase>('loading');
@@ -217,12 +222,6 @@ export function ProjectStartApp({
 
   // Keyboard handling
   useInput((input, key) => {
-    // Global exit
-    if (key.ctrl && input === 'c') {
-      exit();
-      return;
-    }
-
     // In details view
     if (viewMode === 'details') {
       if (key.escape || input === 'q') {
@@ -265,7 +264,7 @@ export function ProjectStartApp({
         return;
       }
     }
-  }, { isActive: process.stdin.isTTY === true });
+  }, { isActive: isInteractive });
 
   // View issue details
   const viewItemDetails = useCallback(async (item: WorkItem) => {
@@ -370,7 +369,13 @@ export function ProjectStartApp({
         const llmAdapter = LLMFactory.create([llmProvider], config.llms, autonomousDataDir, verbose);
 
         // Get items ready for work
-        const readyStatuses = config.project?.fields?.status?.readyValues || ['Todo', 'Ready', 'Evaluated'];
+        const statusFieldName = config.project?.fields?.status?.fieldName;
+        const readyStatuses = Array.from(
+          new Set([
+            ...(config.project?.fields?.status?.readyValues || ['Todo', 'Ready', 'Evaluated']),
+            'Failed Review',
+          ])
+        );
         const projectItems = await projectsAPI.getAllItems({
           status: readyStatuses,
         });
@@ -387,6 +392,7 @@ export function ProjectStartApp({
           title: item.content.title,
           status: 'pending' as const,
           projectItemId: item.id,
+          projectStatus: statusFieldName ? item.fieldValues?.[statusFieldName] : undefined,
         }));
 
         setItems(workItemsList);
@@ -443,6 +449,7 @@ export function ProjectStartApp({
     const config = configManager.getConfig();
     const cwd = process.cwd();
     const projectName = basename(cwd);
+    const statusFieldName = config.project?.fields?.status?.fieldName;
 
     // Ensure worktree exists
     const worktreeManager = new WorktreeManager(cwd);
@@ -461,7 +468,7 @@ export function ProjectStartApp({
       });
     }
 
-    // Process items in parallel (up to maxParallel)
+    // Process items (cap at maxParallel)
     const pendingItems = items.filter(i => i.status === 'pending');
     const processingQueue = [...pendingItems];
     const activeWorkers: Promise<void>[] = [];
@@ -471,8 +478,28 @@ export function ProjectStartApp({
       updateItem(item.issueNumber, { status: 'evaluating' as const, progress: 'Starting...' });
 
       try {
+        // Refresh status to capture late transitions back to Failed Review
+        let projectStatus = item.projectStatus;
+        if (statusFieldName && item.projectItemId) {
+          try {
+            const latestStatus = await projectsAPI.getItemFieldValue(item.projectItemId, statusFieldName);
+            projectStatus = (latestStatus as string) || projectStatus;
+          } catch {
+            // Ignore status fetch failures in UI flow
+          }
+        }
+
         // Get issue details
         const issue = await githubAPI.getIssue(item.issueNumber);
+
+        let failedReviewFeedback: Awaited<ReturnType<typeof getLatestFailedReviewFeedback>> = null;
+        if (projectStatus === 'Failed Review') {
+          try {
+            failedReviewFeedback = await getLatestFailedReviewFeedback(githubAPI, item.issueNumber);
+          } catch {
+            // Keep running even if review feedback cannot be fetched
+          }
+        }
 
         // Get available slot
         const slot = instanceManager.getNextAvailableSlot(llmProvider);
@@ -491,6 +518,10 @@ export function ProjectStartApp({
           requiresTests: config.requirements.testingRequired,
           requiresCI: config.requirements.ciMustPass,
         });
+        if (failedReviewFeedback && assignment.metadata) {
+          assignment.metadata.failedReviewFeedback = failedReviewFeedback.body;
+          assignment.metadata.failedReviewAt = failedReviewFeedback.createdAt;
+        }
 
         await assignmentManager.updateAssignment(assignment.id, {
           llmInstanceId: slot.instanceId,
@@ -531,6 +562,7 @@ export function ProjectStartApp({
           const signals = detectAutonomousSignals(logPath);
           const sessionAnalysis = detectSessionCompletion(logPath);
           const prNumber = extractPRNumber(logPath);
+          const allowHeuristicCompletion = llmAdapter.provider !== 'codex';
           const shouldAnalyze = !status.isRunning || (!llmAdapter.supportsHooks() && signals.hasSignal);
 
           if (!shouldAnalyze) {
@@ -543,7 +575,7 @@ export function ProjectStartApp({
             // Ignore stop failures for already-exited processes
           }
 
-          if (signals.isComplete || sessionAnalysis.isComplete) {
+          if (signals.isComplete || (allowHeuristicCompletion && sessionAnalysis.isComplete)) {
             // Success!
             completed = true;
             updateItem(item.issueNumber, {
@@ -640,33 +672,69 @@ export function ProjectStartApp({
     setPhase('complete');
   }, [services, worktreePath, branchName, items, project, maxParallel, dryRun, updateItem, flushItemUpdates]);
 
-  // Render based on phase and view mode
-  if (phase === 'loading') {
-    return (
-      <Box flexDirection="column" padding={1}>
+  const headerMeta = project || dryRun ? (
+    <Box gap={2}>
+      {project && (
+        <Text>{project.title} (#{project.number})</Text>
+      )}
+      {dryRun && <Text color="yellow">[DRY RUN]</Text>}
+    </Box>
+  ) : null;
+
+  const keyboardHints = useMemo(() => {
+    if (!isInteractive || phase === 'loading') {
+      return [];
+    }
+    if (viewMode === 'details') {
+      return [
+        { keys: 'Esc/q', label: 'back' },
+      ];
+    }
+    const hints = [
+      { keys: '↑/↓', label: 'navigate' },
+      { keys: 'Enter', label: 'details' },
+    ];
+    if (phase === 'ready' && items.length > 0) {
+      hints.push({ keys: 's/Space', label: 'start' });
+    }
+    if (phase === 'complete' || phase === 'error') {
+      hints.push({ keys: 'q', label: 'quit' });
+    }
+    return hints;
+  }, [isInteractive, items.length, phase, viewMode]);
+
+  const showSpinner = isInteractive;
+  let content: React.ReactElement;
+
+  if (isQuietMode) {
+    content = <></>;
+  } else if (phase === 'loading') {
+    content = (
+      <Box flexDirection="column">
         <Box gap={1}>
-          <Spinner label={`Loading project "${projectIdentifier}"...`} />
+          {isInteractive ? (
+            <Spinner label={`Loading project "${projectIdentifier}"...`} />
+          ) : (
+            <Text>Loading project "{projectIdentifier}"...</Text>
+          )}
         </Box>
       </Box>
     );
-  }
-
-  if (phase === 'error') {
-    return (
-      <Box flexDirection="column" padding={1}>
+  } else if (phase === 'error') {
+    content = (
+      <Box flexDirection="column">
         <Text color="red" bold>✗ Error</Text>
         <Text color="red">{error}</Text>
-        <Box marginTop={1}>
-          <Text dimColor>Press q to exit</Text>
-        </Box>
+        {isInteractive && (
+          <Box marginTop={1}>
+            <Text dimColor>Press q to exit</Text>
+          </Box>
+        )}
       </Box>
     );
-  }
-
-  // Details view
-  if (viewMode === 'details' && selectedDetails) {
-    return (
-      <Box flexDirection="column" padding={1}>
+  } else if (viewMode === 'details' && selectedDetails) {
+    content = (
+      <Box flexDirection="column">
         <Box borderStyle="round" borderColor="cyan" paddingX={1} marginBottom={1}>
           <Text bold color="cyan">Issue #{selectedDetails.number}</Text>
         </Box>
@@ -706,89 +774,79 @@ export function ProjectStartApp({
           </Box>
         )}
 
-        <Box marginTop={2}>
-          <Text dimColor>Press Escape or q to return to list</Text>
+        {isInteractive && (
+          <Box marginTop={2}>
+            <Text dimColor>Press Escape or q to return to list</Text>
+          </Box>
+        )}
+      </Box>
+    );
+  } else {
+    content = (
+      <Box flexDirection="column">
+        {/* Summary Bar */}
+        <Box gap={3} marginBottom={1}>
+          <Text>Total: {stats.total}</Text>
+          {stats.working > 0 && <Text color="cyan">⚡ Working: {stats.working}</Text>}
+          {stats.completed > 0 && <Text color="green">✓ Completed: {stats.completed}</Text>}
+          {stats.failed > 0 && <Text color="red">✗ Failed: {stats.failed}</Text>}
+          {stats.blocked > 0 && <Text color="yellow">⚠ Blocked: {stats.blocked}</Text>}
+          {stats.pending > 0 && phase !== 'complete' && (
+            <Text dimColor>Pending: {stats.pending}</Text>
+          )}
+        </Box>
+
+        {/* Worktree info */}
+        {worktreePath && (
+          <Box marginBottom={1}>
+            <Text dimColor>Worktree: {worktreePath}</Text>
+          </Box>
+        )}
+
+        {/* Items List */}
+        {items.length === 0 ? (
+          <Box padding={1}>
+            <Text dimColor>No items ready for work. All caught up! 🎉</Text>
+          </Box>
+        ) : (
+          <Box flexDirection="column">
+            {items.map((item, index) => (
+              <WorkItemRow
+                key={item.issueNumber}
+                item={item}
+                isSelected={index === selectedIndex}
+                showSpinner={showSpinner}
+              />
+            ))}
+          </Box>
+        )}
+
+        {/* Footer / Help */}
+        <Box marginTop={1} flexDirection="column">
+          {isInteractive && phase === 'ready' && items.length > 0 && (
+            <Box borderStyle="round" borderColor="green" paddingX={1}>
+              <Text color="green">
+                Press [s] or [space] to start work on {Math.min(maxParallel, items.length)} item{Math.min(maxParallel, items.length) === 1 ? '' : 's'} in parallel
+              </Text>
+            </Box>
+          )}
+
+          {phase === 'complete' && (
+            <Box borderStyle="round" borderColor="green" paddingX={1}>
+              <Text color="green" bold>
+                ✓ Complete! {stats.completed} completed, {stats.failed} failed
+                {stats.blocked > 0 && `, ${stats.blocked} blocked`}
+              </Text>
+            </Box>
+          )}
         </Box>
       </Box>
     );
   }
 
-  // List view
   return (
-    <Box flexDirection="column" padding={1}>
-      {/* Header */}
-      <Box borderStyle="round" borderColor="blue" paddingX={1} marginBottom={1}>
-        <Box gap={2}>
-          <Text bold color="blue">🚀 Project Start</Text>
-          {project && (
-            <Text>{project.title} (#{project.number})</Text>
-          )}
-          {dryRun && <Text color="yellow">[DRY RUN]</Text>}
-        </Box>
-      </Box>
-
-      {/* Summary Bar */}
-      <Box gap={3} marginBottom={1}>
-        <Text>Total: {stats.total}</Text>
-        {stats.working > 0 && <Text color="cyan">⚡ Working: {stats.working}</Text>}
-        {stats.completed > 0 && <Text color="green">✓ Completed: {stats.completed}</Text>}
-        {stats.failed > 0 && <Text color="red">✗ Failed: {stats.failed}</Text>}
-        {stats.blocked > 0 && <Text color="yellow">⚠ Blocked: {stats.blocked}</Text>}
-        {stats.pending > 0 && phase !== 'complete' && (
-          <Text dimColor>Pending: {stats.pending}</Text>
-        )}
-      </Box>
-
-      {/* Worktree info */}
-      {worktreePath && (
-        <Box marginBottom={1}>
-          <Text dimColor>Worktree: {worktreePath}</Text>
-        </Box>
-      )}
-
-      {/* Items List */}
-      {items.length === 0 ? (
-        <Box padding={1}>
-          <Text dimColor>No items ready for work. All caught up! 🎉</Text>
-        </Box>
-      ) : (
-        <Box flexDirection="column">
-          {items.map((item, index) => (
-            <WorkItemRow
-              key={item.issueNumber}
-              item={item}
-              isSelected={index === selectedIndex}
-            />
-          ))}
-        </Box>
-      )}
-
-      {/* Footer / Help */}
-      <Box marginTop={1} flexDirection="column">
-        {phase === 'ready' && items.length > 0 && (
-          <Box borderStyle="round" borderColor="green" paddingX={1}>
-            <Text color="green">
-              Press [s] or [space] to start work on {Math.min(maxParallel, items.length)} items in parallel
-            </Text>
-          </Box>
-        )}
-
-        {phase === 'complete' && (
-          <Box borderStyle="round" borderColor="green" paddingX={1}>
-            <Text color="green" bold>
-              ✓ Complete! {stats.completed} completed, {stats.failed} failed
-              {stats.blocked > 0 && `, ${stats.blocked} blocked`}
-            </Text>
-          </Box>
-        )}
-
-        <Box marginTop={1} gap={2}>
-          <Text dimColor>↑/↓: Navigate</Text>
-          <Text dimColor>Enter: View details</Text>
-          {phase === 'ready' && <Text dimColor>s/Space: Start</Text>}
-          {phase === 'complete' && <Text dimColor>q: Quit</Text>}
-        </Box>
-      </Box>
-    </Box>
+    <CommandUI commandName="🚀 Project Start" headerMeta={headerMeta} keyboardHints={keyboardHints}>
+      {content}
+    </CommandUI>
   );
 }

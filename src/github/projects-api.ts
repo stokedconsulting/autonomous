@@ -96,8 +96,10 @@ export class GitHubProjectsAPI implements ProjectAPI {
     try {
       const variablesFlag = variables ? `-F ${Object.entries(variables).map(([k, v]) => `${k}=${v}`).join(' -F ')}` : '';
 
+      // Properly escape single quotes for shell by replacing ' with '"'"'
+      const escapedQuery = query.replace(/'/g, "'\"'\"'");
       const result = execSync(
-        `gh api graphql -f query='${query.replace(/'/g, "'\\''")}' ${variablesFlag}`,
+        `gh api graphql -f query='${escapedQuery}' ${variablesFlag}`,
         { encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 }
       );
 
@@ -423,6 +425,33 @@ export class GitHubProjectsAPI implements ProjectAPI {
   }
 
   /**
+   * Get the project number for a given project item
+   * @param itemId The project item ID (e.g., from getAllItems())
+   * @returns The project number, or null if not found
+   */
+  async getProjectNumberForItem(itemId: string): Promise<number | null> {
+    const query = `
+      query($itemId: ID!) {
+        node(id: $itemId) {
+          ... on ProjectV2Item {
+            project {
+              number
+            }
+          }
+        }
+      }
+    `;
+
+    try {
+      const result: any = await this.graphql(query, { itemId });
+      return result.node?.project?.number ?? null;
+    } catch (error) {
+      console.warn(`Could not query project number for item ${itemId}: ${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
+  }
+
+  /**
    * Query project items with filters
    */
   async queryItems(filters?: {
@@ -452,6 +481,15 @@ export class GitHubProjectsAPI implements ProjectAPI {
                     title
                     state
                     url
+                  }
+                  ... on PullRequest {
+                    number
+                    title
+                    state
+                    url
+                  }
+                  ... on DraftIssue {
+                    title
                   }
                 }
                 fieldValues(first: 20) {
@@ -966,6 +1004,85 @@ export class GitHubProjectsAPI implements ProjectAPI {
   }
 
   /**
+   * Ensure the Status field contains all required options
+   * Adds any missing options (keeps existing option IDs intact)
+   */
+  async ensureStatusOptions(requiredOptions: string[]): Promise<void> {
+    const statusFieldName = this.config.fields.status.fieldName;
+    const statusFieldId = await this.getFieldId(statusFieldName);
+
+    if (!statusFieldId) {
+      throw new Error(`Status field "${statusFieldName}" not found in project`);
+    }
+
+    const fields = await this.getFields();
+    const statusField = fields.find((f) => f.name === statusFieldName);
+
+    if (!statusField || !statusField.options) {
+      throw new Error(`Status field "${statusFieldName}" has no options`);
+    }
+
+    const existingOptions = statusField.options as Array<{
+      id?: string;
+      name: string;
+      color?: string;
+      description?: string;
+    }>;
+
+    const existingNames = new Set(existingOptions.map((o) => o.name));
+    const missing = requiredOptions.filter((name) => !existingNames.has(name));
+
+    if (missing.length === 0) {
+      return; // Already has all required options
+    }
+
+    const combinedOptions = [
+      ...existingOptions.map((opt) => ({
+        name: opt.name,
+        color: opt.color || 'GRAY',
+        description: opt.description || '',
+      })),
+      ...missing.map((name) => ({
+        name,
+        color: 'GRAY',
+        description: '',
+      })),
+    ];
+
+    const optionsString = combinedOptions
+      .map((opt) => {
+        const safeName = opt.name.replace(/"/g, '\\"');
+        const safeDesc = (opt.description || '').replace(/"/g, '\\"');
+        return `{ name: "${safeName}", color: ${opt.color}, description: "${safeDesc}" }`;
+      })
+      .join(', ');
+
+    const mutation = `
+      mutation {
+        updateProjectV2Field(input: {
+          fieldId: "${statusFieldId}"
+          name: "${statusFieldName}"
+          singleSelectOptions: [${optionsString}]
+        }) {
+          projectV2Field {
+            ... on ProjectV2SingleSelectField {
+              id
+              name
+              options { id name }
+            }
+          }
+        }
+      }
+    `;
+
+    await this.graphql(mutation);
+    // Refresh caches so subsequent lookups see the new options
+    this.fieldCache.clear();
+    this.fieldIdCache.clear();
+    await this.getFields();
+  }
+
+  /**
    * Ensure autonomous view exists with all required fields
    * Creates view via browser automation if it doesn't exist
    */
@@ -1153,7 +1270,182 @@ export class GitHubProjectsAPI implements ProjectAPI {
   }
 
   /**
+   * Ensure ALL template fields exist in the project with all their options
+   * Creates missing fields and populates single-select fields with all defined options
+   */
+  async ensureAllTemplateFields(): Promise<void> {
+    const { getTemplateFields } = await import('./project-template.js');
+    const templateFields = getTemplateFields();
+    const existingFields = await this.getFields();
+
+    for (const templateField of templateFields) {
+      const existingField = existingFields.find(f => f.name === templateField.name);
+
+      if (!existingField) {
+        // Field doesn't exist - create it
+        console.log(`  Creating field: ${templateField.name}`);
+        await this.createField(templateField);
+        console.log(`  ✓ Created field: ${templateField.name}`);
+      } else if (templateField.type === 'SINGLE_SELECT' && existingField.dataType === 'SINGLE_SELECT') {
+        // Field exists - ensure all options are present
+        console.log(`  Updating field "${templateField.name}" with all options...`);
+        try {
+          await this.ensureFieldOptions(templateField.name, templateField.options);
+          console.log(`  ✓ Updated field: ${templateField.name}`);
+        } catch (err) {
+          console.error(`  ✗ Failed to update field "${templateField.name}":`, err instanceof Error ? err.message : String(err));
+          // Don't throw - continue with other fields
+        }
+      }
+    }
+
+    // Refresh caches
+    this.fieldCache.clear();
+    this.fieldIdCache.clear();
+    await this.getFields();
+  }
+
+  /**
+   * Create a new field in the project
+   */
+  private async createField(fieldDef: any): Promise<void> {
+    if (fieldDef.type === 'SINGLE_SELECT') {
+      const optionsString = fieldDef.options
+        .map((opt: any) => {
+          const safeName = opt.name.replace(/"/g, '\\"');
+          const safeDesc = (opt.description || '').replace(/"/g, '\\"');
+          return `{ name: "${safeName}", color: ${opt.color}, description: "${safeDesc}" }`;
+        })
+        .join(', ');
+
+      const mutation = `
+        mutation {
+          createProjectV2Field(input: {
+            projectId: "${this.projectId}"
+            dataType: SINGLE_SELECT
+            name: "${fieldDef.name}"
+            singleSelectOptions: [${optionsString}]
+          }) {
+            projectV2Field {
+              ... on ProjectV2SingleSelectField {
+                id
+                name
+              }
+            }
+          }
+        }
+      `;
+
+      await this.graphql(mutation);
+    } else if (fieldDef.type === 'TEXT') {
+      const mutation = `
+        mutation {
+          createProjectV2Field(input: {
+            projectId: "${this.projectId}"
+            dataType: TEXT
+            name: "${fieldDef.name}"
+          }) {
+            projectV2Field {
+              ... on ProjectV2Field {
+                id
+                name
+              }
+            }
+          }
+        }
+      `;
+
+      await this.graphql(mutation);
+    } else if (fieldDef.type === 'NUMBER') {
+      const mutation = `
+        mutation {
+          createProjectV2Field(input: {
+            projectId: "${this.projectId}"
+            dataType: NUMBER
+            name: "${fieldDef.name}"
+          }) {
+            projectV2Field {
+              ... on ProjectV2Field {
+                id
+                name
+              }
+            }
+          }
+        }
+      `;
+
+      await this.graphql(mutation);
+    }
+  }
+
+  /**
+   * Ensure a single-select field has all required options
+   */
+  private async ensureFieldOptions(fieldName: string, requiredOptions: Array<{name: string, color: string, description?: string}>): Promise<void> {
+    const fieldId = await this.getFieldId(fieldName);
+    if (!fieldId) return;
+
+    const fields = await this.getFields();
+    const field = fields.find(f => f.name === fieldName);
+    if (!field || !field.options) return;
+
+    const existingOptions = field.options as Array<{
+      id?: string;
+      name: string;
+      color?: string;
+      description?: string;
+    }>;
+
+    const existingNames = new Set(existingOptions.map(o => o.name));
+    const missing = requiredOptions.filter(opt => !existingNames.has(opt.name));
+
+    if (missing.length === 0) return; // Already has all options
+
+    const combinedOptions = [
+      ...existingOptions.map(opt => ({
+        name: opt.name,
+        color: opt.color || 'GRAY',
+        description: opt.description || '',
+      })),
+      ...missing.map(opt => ({
+        name: opt.name,
+        color: opt.color,
+        description: opt.description || '',
+      })),
+    ];
+
+    const optionsString = combinedOptions
+      .map(opt => {
+        const safeName = opt.name.replace(/"/g, '\\"');
+        const safeDesc = (opt.description || '').replace(/"/g, '\\"');
+        return `{ name: "${safeName}", color: ${opt.color}, description: "${safeDesc}" }`;
+      })
+      .join(', ');
+
+    const mutation = `
+      mutation {
+        updateProjectV2Field(input: {
+          fieldId: "${fieldId}"
+          name: "${fieldName}"
+          singleSelectOptions: [${optionsString}]
+        }) {
+          projectV2Field {
+            ... on ProjectV2SingleSelectField {
+              id
+              name
+              options { id name }
+            }
+          }
+        }
+      }
+    `;
+
+    await this.graphql(mutation);
+  }
+
+  /**
    * Ensure Complexity, Impact, and Assigned Instance fields exist in the project
+   * @deprecated Use ensureAllTemplateFields() instead
    */
   async ensureComplexityImpactFields(): Promise<void> {
     const fields = await this.getFields();

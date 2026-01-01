@@ -18,12 +18,20 @@ import { ProjectDiscovery, DiscoveredProject } from '../../github/project-discov
 import { WorktreeManager } from '../../git/worktree-manager.js';
 import { LLMFactory } from '../../llm/llm-factory.js';
 import { PromptBuilder } from '../../llm/prompt-builder.js';
-import { InstanceManager } from '../../core/instance-manager.js';
+import { InstanceManager, InstanceSlot } from '../../core/instance-manager.js';
 import { resolveLLMProvider } from '../../utils/llm-provider.js';
 import { join } from 'path';
 import { promises as fs } from 'fs';
 import { basename } from 'path';
-import { detectSessionCompletion, extractPRNumber } from '../../utils/session-analyzer.js';
+import { detectSessionCompletion, extractPRNumber, detectAutonomousSignals } from '../../utils/session-analyzer.js';
+import { getLatestFailedReviewFeedback } from '../../utils/review-feedback.js';
+import {
+  generateProjectPlan,
+  refineProjectPlan,
+  parseProjectPlan,
+  createProjectIssues
+} from '../../services/project-creation.js';
+import { renderProjectCreation } from '../../ui/apps/index.js';
 
 function hasStderr(error: unknown): error is { stderr: string } {
   return typeof error === 'object' && error !== null && 'stderr' in error;
@@ -32,6 +40,7 @@ function hasStderr(error: unknown): error is { stderr: string } {
 interface ProjectCommandOptions {
   verbose?: boolean;
   limit?: number;
+  all?: boolean;
 }
 
 export async function projectInitCommand(_options: ProjectCommandOptions): Promise<void> {
@@ -64,12 +73,12 @@ export async function projectInitCommand(_options: ProjectCommandOptions): Promi
       process.exit(1);
     }
 
-    // Ensure project config is set
+    // Ensure project config is set (projects are discovered from assignments, not configured here)
     if (!config.project) {
       config.project = {
         enabled: true,
-        projectNumber: parseInt(projectId),
         organizationProject: false, // Default to false, can be updated later.
+        validated: [], // Track which projects have been validated
         fields: {
           status: {
             fieldName: 'Status',
@@ -92,7 +101,10 @@ export async function projectInitCommand(_options: ProjectCommandOptions): Promi
       };
     } else {
       config.project.enabled = true;
-      config.project.projectNumber = parseInt(projectId);
+      // Projects are now discovered from assignments, not configured in config
+      if (!config.project.validated) {
+        config.project.validated = [];
+      }
     }
 
     // When project integration is enabled, clear label filters
@@ -136,13 +148,13 @@ export async function projectStatusCommand(_options: ProjectCommandOptions): Pro
     await _configManager.initialize();
     const config = _configManager.getConfig();
 
-    if (!config.project?.enabled || !config.project.projectNumber) {
-      console.error(chalk.red('Error: GitHub Project integration not enabled or project ID not set.'));
+    if (!config.project?.enabled) {
+      console.error(chalk.red('Error: GitHub Project integration not enabled.'));
       console.error(chalk.red('Please run `auto project init` first.'));
       process.exit(1);
     }
 
-    // Resolve project ID from number
+    // Resolve project ID from repository
     const { resolveProjectId } = await import('../../github/project-resolver.js');
     const projectId = await resolveProjectId(config.github.owner, config.github.repo, false);
     if (!projectId) {
@@ -153,7 +165,7 @@ export async function projectStatusCommand(_options: ProjectCommandOptions): Pro
     const projectsAPI = new GitHubProjectsAPI(projectId, config.project);
     const fields = await projectsAPI.getFields();
 
-    console.log(chalk.green(`✓ Connected to project: ${config.project.projectNumber}`));
+    console.log(chalk.green(`✓ Connected to GitHub Project`));
     console.log(chalk.blue('\nProject Fields:'));
     fields.forEach((field: ProjectField) => {
       console.log(chalk.gray(`  - ${field.name} (${field.dataType})`));
@@ -189,8 +201,8 @@ export async function projectSyncLabelsCommand(options: ProjectCommandOptions): 
     await _configManager.initialize();
     const config = _configManager.getConfig();
 
-    if (!config.project?.enabled || !config.project.projectNumber) {
-      console.error(chalk.red('Error: GitHub Project integration not enabled or project ID not set.'));
+    if (!config.project?.enabled) {
+      console.error(chalk.red('Error: GitHub Project integration not enabled.'));
       console.error(chalk.red('Please run `auto project init` first.'));
       process.exit(1);
     }
@@ -297,8 +309,8 @@ export async function projectClearAssignmentsCommand(_options: ProjectCommandOpt
     await _configManager.initialize();
     const config = _configManager.getConfig();
 
-    if (!config.project?.enabled || !config.project.projectNumber) {
-      console.error(chalk.red('Error: GitHub Project integration not enabled or project ID not set.'));
+    if (!config.project?.enabled) {
+      console.error(chalk.red('Error: GitHub Project integration not enabled.'));
       console.error(chalk.red('Please run `auto project init` first.'));
       process.exit(1);
     }
@@ -344,8 +356,8 @@ export async function projectBackfillCommand(options: ProjectCommandOptions & { 
     await _configManager.initialize();
     const config = _configManager.getConfig();
 
-    if (!config.project?.enabled || !config.project.projectNumber) {
-      console.error(chalk.red('Error: GitHub Project integration not enabled or project ID not set.'));
+    if (!config.project?.enabled) {
+      console.error(chalk.red('Error: GitHub Project integration not enabled.'));
       console.error(chalk.red('Please run `auto project init` first.'));
       process.exit(1);
     }
@@ -464,8 +476,8 @@ export async function projectListReadyCommand(options: ProjectCommandOptions): P
     await _configManager.initialize();
     const config = _configManager.getConfig();
 
-    if (!config.project?.enabled || !config.project.projectNumber) {
-      console.error(chalk.red('Error: GitHub Project integration not enabled or project ID not set.'));
+    if (!config.project?.enabled) {
+      console.error(chalk.red('Error: GitHub Project integration not enabled.'));
       console.error(chalk.red('Please run `auto project init` first.'));
       process.exit(1);
     }
@@ -573,7 +585,7 @@ export async function projectListReadyCommand(options: ProjectCommandOptions): P
 /**
  * List all GitHub Projects linked to this repository
  */
-export async function projectListCommand(_options: ProjectCommandOptions): Promise<void> {
+export async function projectListCommand(options: ProjectCommandOptions): Promise<void> {
   console.log(chalk.blue.bold('\n📋 GitHub Projects Linked to Repository\n'));
 
   try {
@@ -600,24 +612,37 @@ export async function projectListCommand(_options: ProjectCommandOptions): Promi
       return;
     }
 
-    // Show current active project if configured
-    const activeProjectNumber = config.project?.projectNumber;
+    // Filter out [Done] projects unless --all flag is provided
+    const filteredProjects = options.all 
+      ? projects 
+      : projects.filter(p => !p.title.includes('[Done]'));
 
-    console.log(chalk.gray(`Found ${projects.length} project(s):\n`));
+    // Show validated projects (multi-project support)
+    const validatedProjectNumbers = new Set(
+      (config.project?.validated || []).map(p => p.projectNumber)
+    );
 
-    for (const project of projects) {
-      const isActive = activeProjectNumber === project.number;
-      const prefix = isActive ? chalk.green('✓ ') : '  ';
-      const suffix = isActive ? chalk.green(' (active)') : '';
+    const totalCount = projects.length;
+    const displayCount = filteredProjects.length;
+    const hiddenCount = totalCount - displayCount;
+
+    console.log(chalk.gray(`Found ${displayCount} project(s)${hiddenCount > 0 ? ` (${hiddenCount} done projects hidden, use --all to show)` : ''}:\n`));
+
+    for (const project of filteredProjects) {
+      const isValidated = validatedProjectNumbers.has(project.number);
+      const prefix = isValidated ? chalk.green('✓ ') : '  ';
+      const suffix = isValidated ? chalk.gray(' (validated)') : '';
 
       console.log(`${prefix}${chalk.cyan(`#${project.number}`)} ${chalk.white(project.title)}${suffix}`);
       console.log(chalk.gray(`     ${project.url}`));
       console.log('');
     }
 
-    if (!activeProjectNumber) {
-      console.log(chalk.yellow('\nNo project is currently active.'));
-      console.log(chalk.gray('Run `auto project init` to set up project integration.'));
+    if (validatedProjectNumbers.size > 0) {
+      console.log(chalk.gray(`\n✓ ${validatedProjectNumbers.size} project(s) have been validated and set up.`));
+    } else {
+      console.log(chalk.yellow('\nNo projects have been validated yet.'));
+      console.log(chalk.gray('Projects will be automatically validated when you start working on them.'));
     }
   } catch (error: unknown) {
     console.error(chalk.red('\n✗ Error listing projects:'), error instanceof Error ? error.message : String(error));
@@ -629,9 +654,10 @@ interface ProjectStartOptions extends ProjectCommandOptions {
   item?: number;
   dryRun?: boolean;
   review?: boolean;
-  interactive?: boolean;  // Use interactive Ink UI (default when --verbose)
-  maxParallel?: number;   // Max parallel evaluations (default: 3)
+  interactive?: boolean;  // Force Ink UI (default)
+  maxParallel?: number;   // Max parallel evaluations (default: 1)
   provider?: string;
+  ui?: boolean;           // Disable UI when false (--no-ui)
 }
 
 // Track running project processes (in-memory for single process enforcement)
@@ -642,7 +668,7 @@ const runningProjects = new Map<string, { pid: number; worktreePath: string; ins
  * Creates feature branch and worktree if needed, then starts the selected LLM on project items
  *
  * With --review flag: Creates a new project from description, allows review, then starts work
- * With --verbose or --interactive: Uses interactive Ink UI with parallel processing
+ * Ink UI runs by default when the terminal is interactive (use --no-ui to disable)
  */
 export async function projectStartCommand(projectIdentifier: string, options: ProjectStartOptions): Promise<void> {
   // Handle --review mode: create project from description and start after approval
@@ -651,15 +677,18 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
     return;
   }
 
-  // Use interactive Ink UI when --verbose or --interactive is specified
-  if (options.verbose || options.interactive) {
+  const hasTTY = Boolean(process.stdout.isTTY && process.stdin.isTTY);
+  const shouldUseInkUI = options.ui !== false && hasTTY;
+
+  // Use interactive Ink UI by default (unless --no-ui or no TTY)
+  if (shouldUseInkUI || options.interactive || options.verbose) {
     try {
       const { renderProjectStart } = await import('../../ui/apps/index.js');
 
       await renderProjectStart({
         projectIdentifier,
         verbose: options.verbose,
-        maxParallel: options.maxParallel || 3,
+        maxParallel: options.maxParallel ?? 1,
         dryRun: options.dryRun,
         provider: options.provider,
       });
@@ -669,6 +698,8 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
       console.log(chalk.yellow('Falling back to non-interactive mode...\n'));
       // Fall through to non-interactive mode
     }
+  } else if (!hasTTY && options.ui !== false) {
+    console.log(chalk.yellow('⚠️  TTY not detected; run with --no-ui to skip this warning.'));
   }
 
   console.log(chalk.blue.bold('\n🚀 Starting Autonomous Project Work\n'));
@@ -762,49 +793,87 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
     const instanceManager = new InstanceManager(assignmentManager, maxSlots);
 
     // Get items from this project that are ready for work
-    const readyStatuses = config.project?.fields?.status?.readyValues || ['Todo', 'Ready', 'Evaluated'];
+    const statusFieldName = config.project?.fields?.status?.fieldName;
+    const readyStatuses = Array.from(
+      new Set([
+        ...(config.project?.fields?.status?.readyValues || ['Todo', 'Ready', 'Evaluated']),
+        'Failed Review',
+      ])
+    );
     const items = await projectsAPI.getAllItems({
       status: readyStatuses,
     });
 
+    // Look for in-progress items we should resume before picking new work
+    const inProgressStatus = config.project?.fields?.status?.inProgressValue;
+    let resumableItems: typeof items = [];
+    if (inProgressStatus) {
+      try {
+        resumableItems = await projectsAPI.getAllItems({
+          status: [inProgressStatus],
+        });
+      } catch (error) {
+        console.log(chalk.yellow(`\n⚠️  Could not query in-progress items: ${error instanceof Error ? error.message : String(error)}`));
+      }
+    }
+
+    const resumableWorkItems = resumableItems.filter(
+      (item) => !PromptBuilder.isPhaseMaster(item.content.title)
+    );
+
     console.log(chalk.blue(`\n📋 Project has ${items.length} items in ready status`));
 
-    if (items.length === 0) {
+    if (items.length === 0 && resumableWorkItems.length === 0) {
       console.log(chalk.yellow('\nNo items ready for work in this project.'));
       console.log(chalk.gray('Items need to be in one of these statuses: ' + readyStatuses.join(', ')));
       return;
     }
 
-    // Show ready items
-    console.log(chalk.gray('\nReady items:'));
-    const displayLimit = Math.min(items.length, 10);
-    for (let i = 0; i < displayLimit; i++) {
-      const item = items[i];
-      const marker = i === 0 ? chalk.green('→') : ' ';
-      console.log(`${marker} ${chalk.gray(`#${item.content.number}:`)} ${item.content.title}`);
+    // Show ready items (if any)
+    if (items.length > 0) {
+      console.log(chalk.gray('\nReady items:'));
+      const displayLimit = Math.min(items.length, 10);
+      for (let i = 0; i < displayLimit; i++) {
+        const item = items[i];
+        const marker = i === 0 ? chalk.green('→') : ' ';
+        console.log(`${marker} ${chalk.gray(`#${item.content.number}:`)} ${item.content.title}`);
+      }
+      if (items.length > displayLimit) {
+        console.log(chalk.gray(`  ... and ${items.length - displayLimit} more`));
+      }
     }
-    if (items.length > displayLimit) {
-      console.log(chalk.gray(`  ... and ${items.length - displayLimit} more`));
+
+    if (resumableWorkItems.length > 0) {
+      console.log(chalk.gray(`\nFound ${resumableWorkItems.length} in-progress item(s) that can be resumed.`));
     }
 
     // Select item to work on (--item flag or first ready work item)
     let targetItem: typeof items[0] | undefined;
+    let resumingExistingWork = false;
 
     if (options.item) {
-      // Explicit item specified - use it even if it's a Phase Master
-      const specifiedItem = items.find(i => i.content.number === options.item);
-      if (specifiedItem) {
-        targetItem = specifiedItem;
-        console.log(chalk.green(`\n✓ Working on specified item #${options.item}`));
+      // Explicit item specified - look in ready and resumable lists (allow Phase Masters)
+      targetItem =
+        items.find(i => i.content.number === options.item) ||
+        resumableItems.find(i => i.content.number === options.item);
+
+      if (targetItem) {
+        resumingExistingWork = resumableItems.some(i => i.content.number === targetItem!.content.number);
+        const verb = resumingExistingWork ? 'Resuming in-progress item' : 'Working on specified item';
+        console.log(chalk.green(`\n✓ ${verb} #${options.item}`));
       } else {
-        console.log(chalk.yellow(`\n⚠️  Item #${options.item} not found in ready items`));
+        console.log(chalk.yellow(`\n⚠️  Item #${options.item} not found in ready or in-progress items`));
       }
     } else {
       // Auto-select: skip Phase Master items, pick first actual work item
       // Phase Masters coordinate sub-items but shouldn't be auto-selected
       const workItems = items.filter(i => !PromptBuilder.isPhaseMaster(i.content.title));
 
-      if (workItems.length > 0) {
+      if (resumableWorkItems.length > 0) {
+        targetItem = resumableWorkItems[0];
+        resumingExistingWork = true;
+        console.log(chalk.green(`\n✓ Resuming in-progress work item #${targetItem.content.number}`));
+      } else if (workItems.length > 0) {
         targetItem = workItems[0];
         console.log(chalk.green(`\n✓ Working on first ready work item #${targetItem.content.number}`));
       } else {
@@ -821,12 +890,33 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
       return;
     }
 
+    const targetItemStatus = statusFieldName ? targetItem.fieldValues?.[statusFieldName] : undefined;
     const issueNumber = targetItem.content.number;
     const issue = await githubAPI.getIssue(issueNumber);
     console.log(chalk.cyan(`   ${issue.title}`));
 
+    let failedReviewFeedback: Awaited<ReturnType<typeof getLatestFailedReviewFeedback>> = null;
+    if (targetItemStatus === 'Failed Review') {
+      try {
+        failedReviewFeedback = await getLatestFailedReviewFeedback(githubAPI, issueNumber);
+        if (failedReviewFeedback && options.verbose) {
+          console.log(chalk.gray('   Latest failed review feedback will be passed to the LLM.'));
+        }
+      } catch (error) {
+        if (options.verbose) {
+          console.log(
+            chalk.yellow(
+              `   Unable to load failed review feedback for #${issueNumber}: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            )
+          );
+        }
+      }
+    }
+
     // Check if issue is already assigned
-    if (assignmentManager.isIssueAssigned(issueNumber)) {
+    if (!resumingExistingWork && assignmentManager.isIssueAssigned(issueNumber)) {
       const existing = assignmentManager.getAllAssignments().find(a => a.issueNumber === issueNumber);
       console.log(chalk.yellow(`\nIssue #${issueNumber} is already assigned (status: ${existing?.status})`));
       console.log(chalk.gray(`Worktree: ${existing?.worktreePath}`));
@@ -886,16 +976,49 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
       console.log(chalk.green(`✓ Project worktree created: ${worktreePath}`));
     }
 
+    const assignedInstanceFieldName = config.project?.fields?.assignedInstance?.fieldName;
+    const resumeInstanceId =
+      resumingExistingWork && assignedInstanceFieldName
+        ? targetItem!.fieldValues?.[assignedInstanceFieldName]
+        : undefined;
+    const parsedResumeInstance =
+      typeof resumeInstanceId === 'string'
+        ? InstanceManager.parseInstanceId(resumeInstanceId)
+        : null;
+
     // Get next available instance slot
     console.log(chalk.blue('\n🔍 Finding available instance slot...'));
     let llmProvider: LLMProvider;
     try {
-      llmProvider = resolveLLMProvider(config, options.provider);
+      llmProvider = (parsedResumeInstance?.provider as LLMProvider) || resolveLLMProvider(config, options.provider);
     } catch (error) {
       console.error(chalk.red(`Error selecting provider: ${error instanceof Error ? error.message : String(error)}`));
       process.exit(1);
     }
-    const availableSlot = instanceManager.getNextAvailableSlot(llmProvider);
+
+    let availableSlot: InstanceSlot | null = null;
+    if (parsedResumeInstance && parsedResumeInstance.provider === llmProvider) {
+      const maxForProvider = config.llms[llmProvider].maxConcurrentIssues;
+      if (parsedResumeInstance.slotNumber <= maxForProvider) {
+        availableSlot = {
+          provider: llmProvider,
+          slotNumber: parsedResumeInstance.slotNumber,
+          instanceId: resumeInstanceId as string,
+          isAvailable: true,
+        };
+        console.log(chalk.gray(`Reusing assigned instance: ${resumeInstanceId}`));
+      } else {
+        console.log(
+          chalk.yellow(
+            `⚠️  Assigned instance ${resumeInstanceId} exceeds configured slots; selecting next available slot.`
+          )
+        );
+      }
+    }
+
+    if (!availableSlot) {
+      availableSlot = instanceManager.getNextAvailableSlot(llmProvider);
+    }
 
     if (!availableSlot) {
       console.error(chalk.red(`✗ No available ${llmProvider} instances (max: ${config.llms[llmProvider].maxConcurrentIssues})`));
@@ -907,16 +1030,21 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
 
     // Create assignment
     console.log(chalk.blue('\n📝 Creating assignment...'));
-const assignment = await assignmentManager.createAssignment({
+    const assignment = await assignmentManager.createAssignment({
       issueNumber,
       issueTitle: issue.title,
       issueBody: issue.body || undefined,
+      issueUrl: issue.htmlUrl, // Include issue URL for easy reference
       llmProvider,
       worktreePath,
       branchName,
       requiresTests: config.requirements.testingRequired,
       requiresCI: config.requirements.ciMustPass,
     });
+    if (failedReviewFeedback && assignment.metadata) {
+      assignment.metadata.failedReviewFeedback = failedReviewFeedback.body;
+      assignment.metadata.failedReviewAt = failedReviewFeedback.createdAt;
+    }
     // Update assignment with slot-based instance ID
     await assignmentManager.updateAssignment(assignment.id, {
       llmInstanceId: availableSlot.instanceId,
@@ -937,11 +1065,20 @@ const assignment = await assignmentManager.createAssignment({
     // Update assigned instance field in project
     await assignmentManager.updateAssignedInstanceWithSync(assignment.id, availableSlot.instanceId);
 
-    // Generate initial prompt
-    const prompt = PromptBuilder.buildInitialPrompt({
-      assignment,
-      worktreePath,
-    });
+    // Generate prompt (continuation when resuming existing in-progress work)
+    const prompt = resumingExistingWork
+      ? PromptBuilder.buildContinuationPrompt({
+          assignment,
+          worktreePath,
+          lastSummary:
+            assignment.workSessions.length > 0
+              ? assignment.workSessions[assignment.workSessions.length - 1].summary
+              : undefined,
+        })
+      : PromptBuilder.buildInitialPrompt({
+          assignment,
+          worktreePath,
+        });
 
     // Start LLM instance
     console.log(chalk.blue('\n🤖 Starting LLM instance...'));
@@ -964,6 +1101,7 @@ const assignment = await assignmentManager.createAssignment({
     await assignmentManager.addWorkSession(assignment.id, {
       startedAt: new Date().toISOString(),
       promptUsed: prompt,
+      summary: resumingExistingWork ? 'Resumed in-progress work after previous exit' : undefined,
     });
 
     // Record running project
@@ -997,6 +1135,8 @@ const assignment = await assignmentManager.createAssignment({
     let isRunning = true;
     let currentAssignment = assignment;
     let currentInstanceId = availableSlot.instanceId;
+    let lastLogActivityMs = Date.now();
+    let lastIdleRestartMs = 0;
 
     // Handle graceful shutdown
     process.on('SIGINT', async () => {
@@ -1023,6 +1163,59 @@ const assignment = await assignmentManager.createAssignment({
       try {
         // Check if LLM has finished responding (via Stop hook)
         const status = await llmAdapter.getStatus(currentInstanceId);
+        const logPath = join(autonomousDataDir, 'logs', `output-${currentInstanceId}.log`);
+
+        // Detect idle/no-output sessions and restart with a continuation prompt
+        try {
+          const stats = await fs.stat(logPath);
+          lastLogActivityMs = Math.max(lastLogActivityMs, stats.mtimeMs);
+          const idleTimeoutMs = 5 * 60 * 1000; // 5 minutes
+          const now = Date.now();
+          const isIdle = now - stats.mtimeMs > idleTimeoutMs;
+          const canRestart = now - lastIdleRestartMs > idleTimeoutMs / 2;
+
+          if (status.isRunning && isIdle && canRestart) {
+            console.log(chalk.yellow('\n⚠️  No log activity detected for 5 minutes - restarting session...'));
+            lastIdleRestartMs = now;
+            try {
+              await llmAdapter.stop(currentInstanceId);
+            } catch {
+              // Ignore stop errors
+            }
+
+            const continuePrompt = PromptBuilder.buildContinuationPrompt({
+              assignment: currentAssignment,
+              worktreePath,
+              lastSummary:
+                currentAssignment.workSessions.length > 0
+                  ? currentAssignment.workSessions[currentAssignment.workSessions.length - 1].summary
+                  : undefined,
+            });
+
+            const newInstanceId = await llmAdapter.start({
+              assignment: currentAssignment,
+              prompt: continuePrompt,
+              workingDirectory: worktreePath,
+            });
+
+            await assignmentManager.updateAssignment(currentAssignment.id, {
+              llmInstanceId: newInstanceId,
+              lastActivity: new Date().toISOString(),
+            });
+            await assignmentManager.addWorkSession(currentAssignment.id, {
+              startedAt: new Date().toISOString(),
+              promptUsed: continuePrompt,
+              summary: 'Session restarted after idle detection',
+            });
+            await assignmentManager.updateAssignedInstanceWithSync(currentAssignment.id, newInstanceId);
+
+            currentInstanceId = newInstanceId;
+            currentAssignment.llmInstanceId = newInstanceId;
+            continue; // Skip completion check to let new session run
+          }
+        } catch {
+          // Ignore stat errors
+        }
 
         if (!status.isRunning) {
           // LLM finished responding - stop the process and process completion
@@ -1035,13 +1228,32 @@ const assignment = await assignmentManager.createAssignment({
             // Process may have already exited, ignore
           }
 
-          const logPath = join(autonomousDataDir, 'logs', `output-${currentInstanceId}.log`);
+          let autoSignals = detectAutonomousSignals(logPath);
+          if (llmProvider === 'codex') {
+            // Codex logs include the prompt text (with example signals) but no assistant output yet.
+            // Ignore autonomous signals to avoid false positives from the prompt itself.
+            autoSignals = {
+              hasSignal: false,
+              isComplete: false,
+              isBlocked: false,
+              isFailed: false,
+            };
+          }
           const sessionAnalysis = detectSessionCompletion(logPath);
-          const prNumber = extractPRNumber(logPath);
+          const prNumber = autoSignals.prNumber ?? extractPRNumber(logPath);
           const isPhaseMaster = currentAssignment.metadata?.isPhaseMaster === true;
           const hasPR = prNumber !== undefined;
+          const hasIndicators =
+            autoSignals.hasSignal ||
+            sessionAnalysis.indicators.length > 0;
 
-          if (sessionAnalysis.isComplete || (isPhaseMaster && hasPR)) {
+          const isSuccessfulSession =
+            autoSignals.isComplete ||
+            sessionAnalysis.isComplete ||
+            (hasIndicators && !autoSignals.isFailed && !autoSignals.isBlocked) ||
+            (hasPR && !autoSignals.isFailed && !autoSignals.isBlocked);
+
+          if (isSuccessfulSession || (isPhaseMaster && hasPR)) {
             // SUCCESS: Session completed
             console.log(chalk.green(`\n✓ Completed item #${currentAssignment.issueNumber}: ${currentAssignment.issueTitle}`));
             if (prNumber) {
@@ -1087,20 +1299,46 @@ const assignment = await assignmentManager.createAssignment({
 
             // Start on next item
             const nextItem = nextWorkItems[0];
+            const nextItemStatus = statusFieldName ? nextItem.fieldValues?.[statusFieldName] : undefined;
             const nextIssue = await githubAPI.getIssue(nextItem.content.number);
             console.log(chalk.cyan(`📋 Starting next item: #${nextIssue.number} - ${nextIssue.title}`));
+
+            let nextFailedReviewFeedback: Awaited<ReturnType<typeof getLatestFailedReviewFeedback>> = null;
+            if (nextItemStatus === 'Failed Review') {
+              try {
+                nextFailedReviewFeedback = await getLatestFailedReviewFeedback(githubAPI, nextItem.content.number);
+                if (nextFailedReviewFeedback && options.verbose) {
+                  console.log(chalk.gray('   Latest failed review feedback will be passed to the LLM.'));
+                }
+              } catch (error) {
+                if (options.verbose) {
+                  console.log(
+                    chalk.yellow(
+                      `   Unable to load failed review feedback for #${nextItem.content.number}: ${
+                        error instanceof Error ? error.message : String(error)
+                      }`
+                    )
+                  );
+                }
+              }
+            }
 
             // Create new assignment
             const nextAssignment = await assignmentManager.createAssignment({
               issueNumber: nextIssue.number,
               issueTitle: nextIssue.title,
               issueBody: nextIssue.body || undefined,
+              issueUrl: nextIssue.htmlUrl, // Include issue URL for easy reference
               llmProvider,
               worktreePath,
               branchName,
               requiresTests: config.requirements.testingRequired,
               requiresCI: config.requirements.ciMustPass,
             });
+            if (nextFailedReviewFeedback && nextAssignment.metadata) {
+              nextAssignment.metadata.failedReviewFeedback = nextFailedReviewFeedback.body;
+              nextAssignment.metadata.failedReviewAt = nextFailedReviewFeedback.createdAt;
+            }
 
             // Get next slot (reuse the same slot since previous work is done)
             const nextSlot = instanceManager.getNextAvailableSlot(llmProvider);
@@ -1144,6 +1382,18 @@ const assignment = await assignmentManager.createAssignment({
             console.log(chalk.gray(`   Instance: ${currentInstanceId}\n`));
 
           } else {
+            if (autoSignals.isBlocked) {
+              console.log(chalk.yellow(`\n⚠️  LLM reported it is blocked: ${autoSignals.blockedReason || 'no reason provided'}`));
+              console.log(chalk.gray('   Stopping without starting a new item.'));
+              runningProjects.delete(projectKey);
+              break;
+            }
+            if (autoSignals.isFailed) {
+              console.log(chalk.red(`\n❌ LLM reported failure: ${autoSignals.failedReason || 'no reason provided'}`));
+              console.log(chalk.gray('   Stopping without starting a new item.'));
+              runningProjects.delete(projectKey);
+              break;
+            }
             // Process exited but not complete - try to resurrect
             console.log(chalk.yellow(`\n⚠️  Process exited without completion for #${currentAssignment.issueNumber}`));
             console.log(chalk.blue('   Attempting to resurrect...\n'));
@@ -1195,6 +1445,7 @@ const assignment = await assignmentManager.createAssignment({
 
 interface ProjectCreateOptions extends ProjectCommandOptions {
   review?: boolean;
+  reviewed?: boolean;
   start?: boolean;
 }
 
@@ -1219,13 +1470,12 @@ async function projectStartWithReview(
       process.exit(1);
     }
 
-    if (!config.project?.enabled || !config.project.projectNumber) {
+    if (!config.project?.enabled) {
       console.error(chalk.red('Error: GitHub Project not configured.'));
       console.error(chalk.red('Please run `auto project init` first.'));
       process.exit(1);
     }
 
-    const token = await getGitHubToken(config.github.token);
 
     const llmProvider = 'claude'; // For now, we are hardcoding this value
     const llmConfig = config.llms[llmProvider];
@@ -1310,21 +1560,29 @@ async function projectStartWithReview(
     console.log(chalk.green('✓ Project linked to repository'));
 
     // Step 5: Create GitHub issues
-    const { Octokit } = await import('@octokit/rest');
-    const octokit = new Octokit({ auth: token });
 
     const projectsAPI = new GitHubProjectsAPI(newProject.id, config.project);
+    await projectsAPI.ensureAllTemplateFields();
 
+    console.log(chalk.cyan(`\n📝 Creating ${items.length} issues for "${projectTitle}"...\n`));
     await createProjectIssues(
       items,
       projectTitle,
-      octokit,
       config.github.owner,
       config.github.repo,
       projectsAPI,
       newProject.number,
       options.verbose
+        ? (current: number, total: number, title: string) => {
+            console.log(chalk.gray(`  Creating (${current}/${total}): ${title}`));
+          }
+        : (current: number, total: number) => {
+            if (current === 1) process.stdout.write('  ');
+            process.stdout.write(chalk.green('.'));
+            if (current === total) console.log('');
+          }
     );
+    console.log(chalk.green.bold(`\n✅ Project "${projectTitle}" created with ${items.length} issues!\n`));
 
     // Step 6: Start working on the first item
     console.log(chalk.blue.bold('\n🚀 Starting autonomous work on the new project...\n'));
@@ -1354,294 +1612,8 @@ async function projectStartWithReview(
 /**
  * Generate a project plan using Claude
  */
-async function generateProjectPlan(
-  description: string,
-  claudePath: string,
-  workingDirectory: string
-): Promise<string> {
-  const { spawn } = await import('child_process');
-
-  const prompt = `You are a project planning assistant. Create a detailed phased project plan based on the following description.
-
-PROJECT DESCRIPTION:
-${description}
-
-Create a structured project plan with:
-- 2-5 logical phases (depending on complexity)
-- Each phase should have a clear goal and 2-6 concrete work items
-- Each work item should be specific and actionable
-- Include technical details and acceptance criteria
-
-Format your response EXACTLY as follows:
-
-# Project Plan: [Project Title]
-
-## Overview
-[Brief summary of the project]
-
-## Phase 1: [Phase Name]
-**Goal:** [What this phase achieves]
-
-### 1.1) [Work Item Title]
-[Description with acceptance criteria]
-
-### 1.2) [Work Item Title]
-[Description with acceptance criteria]
-
-## Phase 2: [Phase Name]
-**Goal:** [What this phase achieves]
-
-### 2.1) [Work Item Title]
-[Description with acceptance criteria]
-
-[Continue with additional phases as needed...]
-
-## Success Criteria
-[Overall project completion criteria]`;
-
-  return new Promise((resolve, reject) => {
-    const { ANTHROPIC_API_KEY, ...cleanEnv } = process.env;
-
-    const child = spawn(claudePath, ['--print', '--dangerously-skip-permissions'], {
-      cwd: workingDirectory,
-      env: {
-        ...cleanEnv,
-        CLAUDE_INSTANCE_ID: 'project-planner',
-      },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    let output = '';
-    let errorOutput = '';
-
-    child.stdout?.on('data', (data: Buffer) => {
-      output += data.toString();
-    });
-
-    child.stderr?.on('data', (data: Buffer) => {
-      errorOutput += data.toString();
-    });
-
-    child.on('exit', (code) => {
-      if (code === 0) {
-        resolve(output.trim());
-      } else {
-        reject(new Error(`Claude exited with code ${code}: ${errorOutput}`));
-      }
-    });
-
-    child.on('error', reject);
-
-    // Write prompt to stdin and close
-    child.stdin?.write(prompt);
-    child.stdin?.end();
-  });
-}
-
-/**
- * Refine a project plan based on user feedback
- */
-async function refineProjectPlan(
-  currentPlan: string,
-  feedback: string,
-  claudePath: string,
-  workingDirectory: string
-): Promise<string> {
-  const { spawn } = await import('child_process');
-
-  const prompt = `You are a project planning assistant. Refine the following project plan based on user feedback.
-
-CURRENT PLAN:
-${currentPlan}
-
-USER FEEDBACK:
-${feedback}
-
-Please update the plan according to the feedback while maintaining the same format structure. If the feedback asks for clarification, provide it along with any suggested improvements.
-
-Output the complete updated plan in the same format.`;
-
-  return new Promise((resolve, reject) => {
-    const { ANTHROPIC_API_KEY, ...cleanEnv } = process.env;
-
-    const child = spawn(claudePath, ['--print', '--dangerously-skip-permissions'], {
-      cwd: workingDirectory,
-      env: {
-        ...cleanEnv,
-        CLAUDE_INSTANCE_ID: 'project-planner',
-      },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    let output = '';
-    let errorOutput = '';
-
-    child.stdout?.on('data', (data: Buffer) => {
-      output += data.toString();
-    });
-
-    child.stderr?.on('data', (data: Buffer) => {
-      errorOutput += data.toString();
-    });
-
-    child.on('exit', (code) => {
-      if (code === 0) {
-        resolve(output.trim());
-      } else {
-        reject(new Error(`Claude exited with code ${code}: ${errorOutput}`));
-      }
-    });
-
-    child.on('error', reject);
-
-    child.stdin?.write(prompt);
-    child.stdin?.end();
-  });
-}
-
-interface ParsedPhaseItem {
-  title: string;
-  body: string;
-  isMaster: boolean;
-  phase: string;
-  phaseNumber: number;
-  workNumber?: number;
-}
-
-/**
- * Parse a project plan into structured phase items
- */
-function parseProjectPlan(planText: string): { projectTitle: string; items: ParsedPhaseItem[] } {
-  const items: ParsedPhaseItem[] = [];
-
-  // Extract project title from header
-  const titleMatch = planText.match(/^#\s*Project Plan:\s*(.+)$/m);
-  const projectTitle = titleMatch ? titleMatch[1].trim() : 'Untitled Project';
-
-  // Extract phase sections
-  const phasePattern = /## Phase (\d+):?\s*(.+?)\n([\s\S]*?)(?=\n## Phase \d+|## Success Criteria|$)/gi;
-  let match;
-
-  while ((match = phasePattern.exec(planText)) !== null) {
-    const phaseNumber = parseInt(match[1]);
-    const phaseName = match[2].trim();
-    const phaseContent = match[3];
-
-    // Extract goal from phase content
-    const goalMatch = phaseContent.match(/\*\*Goal:\*\*\s*(.+?)(?:\n|$)/);
-    const phaseGoal = goalMatch ? goalMatch[1].trim() : '';
-
-    // Create phase master item
-    items.push({
-      title: `[${projectTitle}] Phase ${phaseNumber}: ${phaseName} - MASTER`,
-      body: `# Phase ${phaseNumber}: ${phaseName}\n\n**Goal:** ${phaseGoal}\n\nThis is the phase master issue. All work items in this phase must complete before this issue can be resolved.`,
-      isMaster: true,
-      phase: `Phase ${phaseNumber}`,
-      phaseNumber,
-    });
-
-    // Extract work items from phase content
-    const workPattern = /###\s*(?:\d+\.)?\s*(\d+)\)\s*(.+?)\n([\s\S]*?)(?=\n###\s*(?:\d+\.)?\s*\d+\)|$)/gi;
-    let workMatch;
-
-    while ((workMatch = workPattern.exec(phaseContent)) !== null) {
-      const workNumber = parseInt(workMatch[1]);
-      const workTitle = workMatch[2].trim();
-      const workBody = workMatch[3].trim();
-
-      items.push({
-        title: `[${projectTitle}] (Phase ${phaseNumber}.${workNumber}) ${workTitle}`,
-        body: workBody || `Work item for Phase ${phaseNumber}: ${phaseName}`,
-        isMaster: false,
-        phase: `Phase ${phaseNumber}`,
-        phaseNumber,
-        workNumber,
-      });
-    }
-  }
-
-  return { projectTitle, items };
-}
-
-/**
- * Create GitHub issues from parsed plan items
- */
-async function createProjectIssues(
-  items: ParsedPhaseItem[],
-  projectTitle: string,
-  octokit: any,
-  owner: string,
-  repo: string,
-  projectsAPI: GitHubProjectsAPI,
-  projectNumber: number,
-  verbose?: boolean
-): Promise<void> {
-  console.log(chalk.cyan(`\n📝 Creating ${items.length} issues for "${projectTitle}"...\n`));
-
-  const { execSync } = await import('child_process');
-
-  for (const item of items) {
-    const itemType = item.isMaster ? 'MASTER' : 'work item';
-    if (verbose) {
-      console.log(chalk.gray(`  Creating ${itemType}: ${item.title}`));
-    }
-
-    try {
-      // Create GitHub issue
-      const { data: issue } = await octokit.issues.create({
-        owner,
-        repo,
-        title: item.title,
-        body: item.body,
-        labels: [],
-      });
-
-      if (verbose) {
-        console.log(chalk.green(`    ✓ Created issue #${issue.number}`));
-      } else {
-        process.stdout.write(chalk.green('.'));
-      }
-
-      // Add to project using gh CLI and get project item ID from response
-      const issueUrl = `https://github.com/${owner}/${repo}/issues/${issue.number}`;
-      const addResult = execSync(`gh project item-add ${projectNumber} --owner ${owner} --url "${issueUrl}" --format json`, {
-        encoding: 'utf-8',
-        stdio: 'pipe',
-      });
-
-      // Parse the JSON response to get the project item ID directly
-      const addedItem = JSON.parse(addResult);
-      const projectItemId = addedItem.id;
-      if (!projectItemId) {
-        console.error(chalk.red(`    ✗ Could not get project item ID for issue #${issue.number}`));
-        continue;
-      }
-
-      // Set Epic field (text field) - use project title
-      await projectsAPI.updateItemTextField(projectItemId, 'Epic', projectTitle);
-
-      // Set Phase field (text field)
-      await projectsAPI.updateItemTextField(projectItemId, 'Phase', item.phase);
-
-      // Set Type field for master items
-      if (item.isMaster) {
-        await projectsAPI.updateItemFieldValue(projectItemId, 'Work Type', 'Phase Master');
-      }
-
-      // Set status to Ready
-      await projectsAPI.updateItemStatusByValue(projectItemId, 'Ready');
-
-    } catch (error) {
-      console.error(chalk.red(`    ✗ Failed to create issue: ${error}`));
-    }
-  }
-
-  if (!verbose) {
-    console.log(''); // New line after dots
-  }
-
-  console.log(chalk.green.bold(`\n✅ Project "${projectTitle}" created with ${items.length} issues!\n`));
-}
+// Project creation functions moved to src/services/project-creation.ts
+// and are imported above
 
 /**
  * Create a new project from a description
@@ -1665,17 +1637,88 @@ export async function projectCreateCommand(
       process.exit(1);
     }
 
-    if (!config.project?.enabled || !config.project.projectNumber) {
+    if (!config.project?.enabled) {
       console.error(chalk.red('Error: GitHub Project not configured.'));
       console.error(chalk.red('Please run `auto project init` first.'));
       process.exit(1);
     }
 
-    const token = await getGitHubToken(config.github.token);
 
     const llmProvider = 'claude'; // For now, we are hardcoding this value
     const llmConfig = config.llms[llmProvider];
     const claudePath = llmConfig.cliPath || 'claude';
+
+    // If --reviewed flag is set, use the two-stage Ink UI workflow
+    if (options.reviewed) {
+      await renderProjectCreation({
+        description,
+        claudePath,
+        workingDirectory: cwd,
+        onComplete: async (implementationPlanPath: string) => {
+          console.log(chalk.green.bold('\n✅ Implementation plan approved!\n'));
+          console.log(chalk.cyan('📄 Plan saved to: ' + implementationPlanPath));
+
+          // Read the implementation plan
+          const planContent = await fs.readFile(implementationPlanPath, 'utf-8');
+
+          // Parse plan into structured items
+          console.log(chalk.cyan('\n🔍 Parsing project structure...\n'));
+          const { projectTitle, items } = parseProjectPlan(planContent);
+
+          const masterCount = items.filter(i => i.isMaster).length;
+          const workCount = items.filter(i => !i.isMaster).length;
+          console.log(chalk.gray(`  Found ${masterCount} phases with ${workCount} work items`));
+
+          // Create GitHub project board
+          console.log(chalk.cyan('\n📋 Creating GitHub Project board...\n'));
+          const discovery = new ProjectDiscovery(config.github.owner, config.github.repo);
+          const newProject = await discovery.createProject(projectTitle);
+
+          console.log(chalk.green(`✓ Created project: ${newProject.title} (#${newProject.number})`));
+          console.log(chalk.gray(`  ${newProject.url}`));
+
+          // Link project to repository
+          console.log(chalk.blue('\n🔗 Linking project to repository...'));
+          await discovery.linkProjectToRepo(newProject.id);
+          console.log(chalk.green('✓ Project linked to repository'));
+
+          // Ensure status options
+          if (!config.project) {
+            throw new Error('Project configuration not found');
+          }
+          const projectsAPI = new GitHubProjectsAPI(newProject.id, config.project);
+          await projectsAPI.ensureAllTemplateFields();
+
+          // Create GitHub issues
+          console.log(chalk.cyan(`\n📝 Creating ${items.length} issues for "${projectTitle}"...\n`));
+          await createProjectIssues(
+            items,
+            projectTitle,
+            config.github.owner,
+            config.github.repo,
+            projectsAPI,
+            newProject.number,
+            options.verbose
+              ? (current: number, total: number, title: string) => {
+                  console.log(chalk.gray(`  Creating (${current}/${total}): ${title}`));
+                }
+              : (current: number, total: number) => {
+                  if (current === 1) process.stdout.write('  ');
+                  process.stdout.write(chalk.green('.'));
+                  if (current === total) console.log('');
+                }
+          );
+
+          console.log(chalk.green.bold(`\n✅ Project "${projectTitle}" created with ${items.length} issues!\n`));
+          console.log(chalk.cyan(`\n🔗 Project URL: ${newProject.url}\n`));
+        },
+        onCancel: () => {
+          console.log(chalk.yellow('\n✗ Project creation cancelled.\n'));
+          process.exit(0);
+        }
+      });
+      return;
+    }
 
     // Step 1: Generate project plan
     console.log(chalk.cyan('🤖 Generating project plan...\n'));
@@ -1758,21 +1801,28 @@ export async function projectCreateCommand(
     console.log(chalk.green('✓ Project linked to repository'));
 
     // Step 5: Create GitHub issues
-    const { Octokit } = await import('@octokit/rest');
-    const octokit = new Octokit({ auth: token });
 
     const projectsAPI = new GitHubProjectsAPI(newProject.id, config.project);
 
+    console.log(chalk.cyan(`\n📝 Creating ${items.length} issues for "${projectTitle}"...\n`));
     await createProjectIssues(
       items,
       projectTitle,
-      octokit,
       config.github.owner,
       config.github.repo,
       projectsAPI,
       newProject.number,
       options.verbose
+        ? (current: number, total: number, title: string) => {
+            console.log(chalk.gray(`  Creating (${current}/${total}): ${title}`));
+          }
+        : (current: number, total: number) => {
+            if (current === 1) process.stdout.write('  ');
+            process.stdout.write(chalk.green('.'));
+            if (current === total) console.log('');
+          }
     );
+    console.log(chalk.green.bold(`\n✅ Project "${projectTitle}" created with ${items.length} issues!\n`));
 
     // If --start flag is set, automatically start working on the project
     if (options.start) {
@@ -1831,7 +1881,6 @@ export async function projectAddCommand(
       process.exit(1);
     }
 
-    const token = await getGitHubToken(config.github.token);
 const llmProvider = 'claude'; // For now, we are hardcoding this value
     const llmConfig = config.llms[llmProvider];
     const claudePath = llmConfig.cliPath || 'claude';
@@ -1893,21 +1942,29 @@ const llmProvider = 'claude'; // For now, we are hardcoding this value
     }
 
     // Create GitHub issues
-    const { Octokit } = await import('@octokit/rest');
-    const octokit = new Octokit({ auth: token });
 
     const projectsAPI = new GitHubProjectsAPI(targetProject.id, config.project as ProjectConfig);
+    await projectsAPI.ensureAllTemplateFields();
 
+    console.log(chalk.cyan(`\n📝 Creating ${items.length} issues for "${projectTitle}"...\n`));
     await createProjectIssues(
       items,
       projectTitle,
-      octokit,
       config.github.owner,
       config.github.repo,
       projectsAPI,
       targetProject.number,
       options.verbose
+        ? (current: number, total: number, title: string) => {
+            console.log(chalk.gray(`  Creating (${current}/${total}): ${title}`));
+          }
+        : (current: number, total: number) => {
+            if (current === 1) process.stdout.write('  ');
+            process.stdout.write(chalk.green('.'));
+            if (current === total) console.log('');
+          }
     );
+    console.log(chalk.green.bold(`\n✅ Issues added to project "${targetProject.title}"!\n`));
 
     // If --start flag is set, start working
     if (options.start) {
@@ -1956,6 +2013,220 @@ export async function projectReviewCommand(
     });
   } catch (error: unknown) {
     console.error(chalk.red('\n✗ Error reviewing project:'), error instanceof Error ? error.message : String(error));
+    if (options.verbose && error instanceof Error) {
+      console.error(error.stack);
+    }
+    process.exit(1);
+  }
+}
+
+interface ProjectDesignOptions extends ProjectCommandOptions {
+  interactive?: boolean;
+}
+
+/**
+ * Design or modify a GitHub Project using Claude with /sc:design
+ *
+ * Usage:
+ *   auto project design "create user management system"  - Create new project
+ *   auto project design 12 "add authentication component" - Modify project #12
+ */
+export async function projectDesignCommand(
+  projectNumberOrDescription: string,
+  descriptionOrOptions?: string | ProjectDesignOptions,
+  maybeOptions?: ProjectDesignOptions
+): Promise<void> {
+  // Parse arguments - handle both signatures:
+  // design <description> [options]
+  // design <number> <description> [options]
+  const projectNumber = parseInt(projectNumberOrDescription);
+  const isModify = !isNaN(projectNumber);
+
+  const description = isModify ? (descriptionOrOptions as string) : projectNumberOrDescription;
+  const options = isModify ? (maybeOptions || {}) : (descriptionOrOptions as ProjectDesignOptions || {});
+
+  if (isModify) {
+    await projectDesignModifyCommand(projectNumber, description, options);
+  } else {
+    await projectDesignCreateCommand(description, options);
+  }
+}
+
+/**
+ * Create a new GitHub Project using Claude with /sc:design directive
+ */
+async function projectDesignCreateCommand(
+  description: string,
+  options: ProjectDesignOptions
+): Promise<void> {
+  console.log(chalk.blue.bold('\n🎨 Designing New Project with Claude\n'));
+
+  try {
+    const cwd = process.cwd();
+    const configManager = new ConfigManager(cwd);
+    await configManager.initialize();
+    const config = configManager.getConfig();
+
+    if (!config.github.owner || !config.github.repo) {
+      console.error(chalk.red('Error: GitHub owner and repo not configured.'));
+      console.error(chalk.red('Please run `auto config init` first.'));
+      process.exit(1);
+    }
+
+    const llmProvider = 'claude';
+    const llmConfig = config.llms[llmProvider];
+    const claudePath = llmConfig.cliPath || 'claude';
+
+    // Build design prompt with /sc:design directive
+    const designPrompt = `/sc:design
+
+Design a GitHub Project for the following requirement:
+
+${description}
+
+Please create a comprehensive project plan that includes:
+1. Project title
+2. Phased breakdown with Phase Masters
+3. Detailed work items for each phase
+4. Dependencies between phases
+
+Format the output according to the project plan template.`;
+
+    console.log(chalk.cyan('🤖 Generating project design with Claude...\n'));
+
+    // Use spawn to run Claude interactively
+    const { spawn } = await import('child_process');
+
+    const proc = spawn(claudePath, [], {
+      cwd,
+      stdio: 'inherit',
+      env: {
+        ...process.env,
+        CLAUDE_PROMPT: designPrompt,
+      },
+    });
+
+    proc.on('exit', (code) => {
+      if (code === 0) {
+        console.log(chalk.green('\n✓ Project design completed!'));
+        console.log(chalk.gray('\nUse the output to create your project with:'));
+        console.log(chalk.gray('  auto project create "<title>"'));
+      } else {
+        console.error(chalk.red(`\n✗ Claude exited with code ${code}`));
+        process.exit(1);
+      }
+    });
+
+  } catch (error: unknown) {
+    console.error(chalk.red('\n✗ Error designing project:'), error instanceof Error ? error.message : String(error));
+    if (options.verbose && error instanceof Error) {
+      console.error(error.stack);
+    }
+    process.exit(1);
+  }
+}
+
+/**
+ * Modify an existing GitHub Project using Claude with /sc:design directive
+ */
+async function projectDesignModifyCommand(
+  projectNumber: number,
+  description: string,
+  options: ProjectDesignOptions
+): Promise<void> {
+  console.log(chalk.blue.bold(`\n🎨 Modifying GitHub Project #${projectNumber} with Claude\n`));
+
+  try {
+    const cwd = process.cwd();
+    const configManager = new ConfigManager(cwd);
+    await configManager.initialize();
+    const config = configManager.getConfig();
+
+    if (!config.github.owner || !config.github.repo) {
+      console.error(chalk.red('Error: GitHub owner and repo not configured.'));
+      console.error(chalk.red('Please run `auto config init` first.'));
+      process.exit(1);
+    }
+
+    // Find the project
+    const discovery = new ProjectDiscovery(config.github.owner, config.github.repo);
+    const linkedProjects = await discovery.getLinkedProjects();
+    const targetProject = linkedProjects.find(p => p.number === projectNumber);
+
+    if (!targetProject) {
+      console.error(chalk.red(`Error: Project #${projectNumber} not found`));
+      console.log(chalk.yellow('\nAvailable projects:'));
+      for (const p of linkedProjects) {
+        console.log(chalk.gray(`  #${p.number}: ${p.title}`));
+      }
+      process.exit(1);
+    }
+
+    console.log(chalk.green(`✓ Found project: ${targetProject.title} (#${targetProject.number})`));
+
+    // Load project items to provide context
+    const projectsAPI = new GitHubProjectsAPI(targetProject.id, config.project as ProjectConfig);
+    const items = await projectsAPI.getAllItems();
+
+    console.log(chalk.gray(`  Current items: ${items.length}`));
+
+    // Build context about current project structure
+    const projectContext = items.map(item => {
+      const status = item.fieldValues['Status'] || 'No Status';
+      const phase = item.fieldValues['Epic'] || item.fieldValues['Phase'] || 'No Phase';
+      return `- #${item.content.number}: ${item.content.title} [${status}] (${phase})`;
+    }).join('\n');
+
+    const llmProvider = 'claude';
+    const llmConfig = config.llms[llmProvider];
+    const claudePath = llmConfig.cliPath || 'claude';
+
+    // Build modification prompt with /sc:design directive
+    const designPrompt = `/sc:design
+
+Modify GitHub Project #${projectNumber}: "${targetProject.title}"
+
+Current project structure:
+${projectContext}
+
+Modification request:
+${description}
+
+Please provide a design for the modifications needed. This should include:
+1. New issues to create (if any)
+2. Issues to modify (if any)
+3. Issues to close (if any)
+4. Updated phase structure (if applicable)
+
+Format the output as actionable changes to the GitHub Project.`;
+
+    console.log(chalk.cyan('🤖 Generating project modifications with Claude...\n'));
+
+    // Use spawn to run Claude interactively
+    const { spawn } = await import('child_process');
+
+    const proc = spawn(claudePath, [], {
+      cwd,
+      stdio: 'inherit',
+      env: {
+        ...process.env,
+        CLAUDE_PROMPT: designPrompt,
+      },
+    });
+
+    proc.on('exit', (code) => {
+      if (code === 0) {
+        console.log(chalk.green('\n✓ Project modification design completed!'));
+        console.log(chalk.gray('\nReview the proposed changes and apply them manually to project:'));
+        console.log(chalk.gray(`  ${targetProject.url}`));
+      } else {
+        console.error(chalk.red(`\n✗ Claude exited with code ${code}`));
+        process.exit(1);
+      }
+    });
+
+  } catch (error: unknown) {
+    console.error(chalk.red('\n✗ Error modifying project:'), error instanceof Error ? error.message : String(error));
     if (options.verbose && error instanceof Error) {
       console.error(error.stack);
     }

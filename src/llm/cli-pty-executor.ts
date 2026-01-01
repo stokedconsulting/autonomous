@@ -102,7 +102,16 @@ export class CLIPTYExecutor extends EventEmitter {
     this.promptTimer = setTimeout(sendPrompt, promptDelayMs);
 
     this.ptyProcess.onData((data: string) => {
-      const output = this.stripEcho(data);
+      let chunk = data;
+
+      // Respond to cursor position queries (`CSI 6n`) ourselves since there is no real terminal emulator
+      if (chunk.includes('\u001b[6n')) {
+        this.ptyProcess?.write('\u001b[1;1R');
+        // eslint-disable-next-line no-control-regex
+        chunk = chunk.replace(/\u001b\[6n/g, '');
+      }
+
+      const output = this.stripEcho(chunk);
 
       if (this.logStream) {
         this.logStream.write(output);

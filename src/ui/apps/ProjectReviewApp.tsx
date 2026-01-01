@@ -9,9 +9,10 @@
  * - Real-time progress tracking with URLs
  */
 
-import React, { useState, useEffect, useCallback } from 'react';
-import { Box, Text, useApp, useInput } from 'ink';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import { Box, Text, useInput } from 'ink';
 import { Spinner } from '@inkjs/ui';
+import { CommandUI, useCommandUI } from '../components/CommandUI.js';
 import { ConfigManager } from '../../core/config-manager.js';
 import { ProjectConfig } from '../../types/config.js';
 import { AssignmentManager } from '../../core/assignment-manager.js';
@@ -84,7 +85,7 @@ export function ProjectReviewApp({
   verbose = false,
   maxParallel = 3,
 }: ProjectReviewAppProps): React.ReactElement {
-  const { exit } = useApp();
+  const { exit, isInteractive, isQuietMode } = useCommandUI();
 
   // State
   const [phase, setPhase] = useState<AppPhase>('loading');
@@ -133,12 +134,6 @@ export function ProjectReviewApp({
 
   // Keyboard handling (only when running in a TTY)
   useInput((input, key) => {
-    // Global exit
-    if (key.ctrl && input === 'c') {
-      exit();
-      return;
-    }
-
     // In details view
     if (viewMode === 'details') {
       if (key.escape || input === 'q') {
@@ -184,7 +179,7 @@ export function ProjectReviewApp({
         return;
       }
     }
-  }, { isActive: process.stdin.isTTY === true });
+  }, { isActive: isInteractive });
 
   // Initialize and load project
   useEffect(() => {
@@ -409,33 +404,68 @@ export function ProjectReviewApp({
   const errorCount = items.filter(i => i.status === 'error').length;
   const pendingCount = items.filter(i => i.status === 'pending' || i.status === 'reviewing').length;
 
-  // Render based on phase
-  if (phase === 'loading') {
-    return (
-      <Box flexDirection="column" padding={1}>
+  const headerMeta = project || allItems || multiPersona ? (
+    <Box gap={2}>
+      {project && (
+        <Text>{project.title} (#{project.number})</Text>
+      )}
+      {allItems && <Text color="yellow">[ALL]</Text>}
+      {multiPersona && <Text color="cyan">[MULTI]</Text>}
+    </Box>
+  ) : null;
+
+  const keyboardHints = useMemo(() => {
+    if (!isInteractive || phase === 'loading' || phase === 'ready') {
+      return [];
+    }
+    if (viewMode === 'details') {
+      return [
+        { keys: 'Esc/q', label: 'back' },
+      ];
+    }
+    const hints = [
+      { keys: '↑/↓', label: 'navigate' },
+      { keys: 'Enter', label: 'details' },
+      { keys: 'g/G', label: 'first/last' },
+    ];
+    if (phase === 'complete' || phase === 'error') {
+      hints.push({ keys: 'q', label: 'quit' });
+    }
+    return hints;
+  }, [isInteractive, phase, viewMode]);
+
+  const showSpinner = isInteractive;
+  let content: React.ReactElement;
+
+  if (isQuietMode) {
+    content = <></>;
+  } else if (phase === 'loading') {
+    content = (
+      <Box flexDirection="column">
         <Box gap={1}>
-          <Spinner label={`Loading project "${projectIdentifier}"...`} />
+          {isInteractive ? (
+            <Spinner label={`Loading project "${projectIdentifier}"...`} />
+          ) : (
+            <Text>Loading project "{projectIdentifier}"...</Text>
+          )}
         </Box>
       </Box>
     );
-  }
-
-  if (phase === 'error') {
-    return (
-      <Box flexDirection="column" padding={1}>
+  } else if (phase === 'error') {
+    content = (
+      <Box flexDirection="column">
         <Text color="red" bold>✗ Error</Text>
         <Text color="red">{error}</Text>
-        <Box marginTop={1}>
-          <Text dimColor>Press q to exit</Text>
-        </Box>
+        {isInteractive && (
+          <Box marginTop={1}>
+            <Text dimColor>Press q to exit</Text>
+          </Box>
+        )}
       </Box>
     );
-  }
-
-  // Details view
-  if (viewMode === 'details' && selectedDetails) {
-    return (
-      <Box flexDirection="column" padding={1}>
+  } else if (viewMode === 'details' && selectedDetails) {
+    content = (
+      <Box flexDirection="column">
         <Box borderStyle="round" borderColor="cyan" paddingX={1} marginBottom={1}>
           <Text bold color="cyan">Issue #{selectedDetails.number}</Text>
         </Box>
@@ -475,132 +505,119 @@ export function ProjectReviewApp({
           </Box>
         )}
 
-        <Box marginTop={2}>
-          <Text dimColor>Press Escape or q to return to list</Text>
+        {isInteractive && (
+          <Box marginTop={2}>
+            <Text dimColor>Press Escape or q to return to list</Text>
+          </Box>
+        )}
+      </Box>
+    );
+  } else {
+    content = (
+      <Box flexDirection="column">
+        {/* Summary Bar */}
+        <Box gap={3} marginBottom={1}>
+          <Text>Total: {items.length}</Text>
+          {phase === 'reviewing' && (
+            <>
+              <Text color="cyan">Active: {activeWorkers}/{maxParallel}</Text>
+              <Text color="blue">Done: {completedCount}/{items.length}</Text>
+            </>
+          )}
+          {passedCount > 0 && <Text color="green">✓ Passed: {passedCount}</Text>}
+          {failedCount > 0 && <Text color="red">✗ Failed: {failedCount}</Text>}
+          {errorCount > 0 && <Text color="yellow">⚠ Errors: {errorCount}</Text>}
+          {pendingCount > 0 && phase !== 'complete' && (
+            <Text dimColor>Pending: {pendingCount}</Text>
+          )}
         </Box>
+
+        {/* Items List */}
+        {items.length === 0 ? (
+          <Box padding={1}>
+            <Text dimColor>No items to review. All caught up! 🎉</Text>
+          </Box>
+        ) : (
+          <Box flexDirection="column">
+            {items.map((item, index) => {
+              const isSelected = index === selectedIndex;
+              const isActive = item.status === 'reviewing';
+
+              let statusIcon: string;
+              let statusColor: string;
+
+              switch (item.status) {
+                case 'passed':
+                  statusIcon = '✓';
+                  statusColor = 'green';
+                  break;
+                case 'failed':
+                  statusIcon = '✗';
+                  statusColor = 'red';
+                  break;
+                case 'error':
+                  statusIcon = '⚠';
+                  statusColor = 'yellow';
+                  break;
+                case 'reviewing':
+                  statusIcon = '◎';
+                  statusColor = 'cyan';
+                  break;
+                default:
+                  statusIcon = '○';
+                  statusColor = 'gray';
+              }
+
+              // Determine which URL to show: commentUrl if review is done, otherwise issueUrl
+              const displayUrl = item.commentUrl || item.issueUrl;
+
+              return (
+                <Box key={item.issueNumber} gap={1}>
+                  <Text color={isSelected ? 'white' : 'gray'}>
+                    {isSelected ? '▸' : ' '}
+                  </Text>
+                  <Text color={statusColor}>{statusIcon}</Text>
+                  <Text color="yellow">#{item.issueNumber}</Text>
+                  <Text color={isSelected ? 'white' : isActive ? 'cyan' : undefined} bold={isSelected}>
+                    {(() => {
+                      const meaningful = extractMeaningfulTitle(item.title);
+                      return meaningful.length > 40 ? meaningful.substring(0, 40) + '...' : meaningful;
+                    })()}
+                  </Text>
+                  {item.branch && (
+                    <Text dimColor>[{item.branch}]</Text>
+                  )}
+                  {item.status === 'reviewing' && showSpinner && <Spinner />}
+                  {displayUrl && (
+                    <Text dimColor>→ {displayUrl}</Text>
+                  )}
+                  {item.errorMessage && (
+                    <Text color="yellow">({item.errorMessage})</Text>
+                  )}
+                </Box>
+              );
+            })}
+          </Box>
+        )}
+
+        {/* Footer */}
+        {phase === 'complete' && (
+          <Box marginTop={1} flexDirection="column">
+            <Box borderStyle="round" borderColor="green" paddingX={1}>
+              <Text color="green" bold>
+                ✓ Review complete! {passedCount} passed, {failedCount} failed
+                {errorCount > 0 && `, ${errorCount} errors`}
+              </Text>
+            </Box>
+          </Box>
+        )}
       </Box>
     );
   }
 
-  // List view
   return (
-    <Box flexDirection="column" padding={1}>
-      {/* Header */}
-      <Box borderStyle="round" borderColor="blue" paddingX={1} marginBottom={1}>
-        <Box gap={2}>
-          <Text bold color="blue">🔍 Project Review</Text>
-          {project && (
-            <Text>{project.title} (#{project.number})</Text>
-          )}
-          {allItems && <Text color="yellow">[ALL]</Text>}
-          {multiPersona && <Text color="cyan">[MULTI]</Text>}
-        </Box>
-      </Box>
-
-      {/* Summary Bar */}
-      <Box gap={3} marginBottom={1}>
-        <Text>Total: {items.length}</Text>
-        {phase === 'reviewing' && (
-          <>
-            <Text color="cyan">Active: {activeWorkers}/{maxParallel}</Text>
-            <Text color="blue">Done: {completedCount}/{items.length}</Text>
-          </>
-        )}
-        {passedCount > 0 && <Text color="green">✓ Passed: {passedCount}</Text>}
-        {failedCount > 0 && <Text color="red">✗ Failed: {failedCount}</Text>}
-        {errorCount > 0 && <Text color="yellow">⚠ Errors: {errorCount}</Text>}
-        {pendingCount > 0 && phase !== 'complete' && (
-          <Text dimColor>Pending: {pendingCount}</Text>
-        )}
-      </Box>
-
-      {/* Items List */}
-      {items.length === 0 ? (
-        <Box padding={1}>
-          <Text dimColor>No items to review. All caught up! 🎉</Text>
-        </Box>
-      ) : (
-        <Box flexDirection="column">
-          {items.map((item, index) => {
-            const isSelected = index === selectedIndex;
-            const isActive = item.status === 'reviewing';
-
-            let statusIcon: string;
-            let statusColor: string;
-
-            switch (item.status) {
-              case 'passed':
-                statusIcon = '✓';
-                statusColor = 'green';
-                break;
-              case 'failed':
-                statusIcon = '✗';
-                statusColor = 'red';
-                break;
-              case 'error':
-                statusIcon = '⚠';
-                statusColor = 'yellow';
-                break;
-              case 'reviewing':
-                statusIcon = '◎';
-                statusColor = 'cyan';
-                break;
-              default:
-                statusIcon = '○';
-                statusColor = 'gray';
-            }
-
-            // Determine which URL to show: commentUrl if review is done, otherwise issueUrl
-            const displayUrl = item.commentUrl || item.issueUrl;
-
-            return (
-              <Box key={item.issueNumber} gap={1}>
-                <Text color={isSelected ? 'white' : 'gray'}>
-                  {isSelected ? '▸' : ' '}
-                </Text>
-                <Text color={statusColor}>{statusIcon}</Text>
-                <Text color="yellow">#{item.issueNumber}</Text>
-                <Text color={isSelected ? 'white' : isActive ? 'cyan' : undefined} bold={isSelected}>
-                  {(() => {
-                    const meaningful = extractMeaningfulTitle(item.title);
-                    return meaningful.length > 40 ? meaningful.substring(0, 40) + '...' : meaningful;
-                  })()}
-                </Text>
-                {item.branch && (
-                  <Text dimColor>[{item.branch}]</Text>
-                )}
-                {item.status === 'reviewing' && <Spinner />}
-                {displayUrl && (
-                  <Text dimColor>→ {displayUrl}</Text>
-                )}
-                {item.errorMessage && (
-                  <Text color="yellow">({item.errorMessage})</Text>
-                )}
-              </Box>
-            );
-          })}
-        </Box>
-      )}
-
-      {/* Footer */}
-      {phase === 'complete' && (
-        <Box marginTop={1} flexDirection="column">
-          <Box borderStyle="round" borderColor="green" paddingX={1}>
-            <Text color="green" bold>
-              ✓ Review complete! {passedCount} passed, {failedCount} failed
-              {errorCount > 0 && `, ${errorCount} errors`}
-            </Text>
-          </Box>
-        </Box>
-      )}
-
-      {/* Keyboard hints */}
-      <Box marginTop={1} gap={2}>
-        <Text dimColor>↑/↓: Navigate</Text>
-        <Text dimColor>Enter: View details</Text>
-        <Text dimColor>g/G: First/Last</Text>
-        {phase === 'complete' && <Text dimColor>q: Quit</Text>}
-      </Box>
-    </Box>
+    <CommandUI commandName="🔍 Project Review" headerMeta={headerMeta} keyboardHints={keyboardHints}>
+      {content}
+    </CommandUI>
   );
 }

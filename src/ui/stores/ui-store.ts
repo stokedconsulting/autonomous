@@ -4,7 +4,8 @@
 
 import { create } from 'zustand';
 
-export type ViewType = 'status' | 'orchestrator' | 'project' | 'review' | 'config' | 'help';
+export type TabType = 'status' | 'project' | 'orchestrator';
+export type ViewType = TabType | 'review' | 'queue' | 'config' | 'setup' | 'help';
 
 interface Notification {
   id: string;
@@ -13,8 +14,24 @@ interface Notification {
   timestamp: Date;
 }
 
+// Map views to their parent tab
+const VIEW_TO_TAB: Record<ViewType, TabType> = {
+  status: 'status',
+  review: 'status',
+  project: 'project',
+  queue: 'project',
+  orchestrator: 'orchestrator',
+  config: 'status', // Config accessible from any tab, default to status
+  setup: 'status', // Setup is initial, default to status
+  help: 'status', // Help is overlay, default to status
+};
+
+// Tab-level views (no nesting)
+const TAB_VIEWS: ViewType[] = ['status', 'project', 'orchestrator'];
+
 interface UIState {
   // Navigation
+  currentTab: TabType;
   currentView: ViewType;
   breadcrumbs: string[];
   history: ViewType[];
@@ -23,16 +40,20 @@ interface UIState {
   showHelp: boolean;
   selectedIndex: number;
   notifications: Notification[];
+  isTextInputActive: boolean; // Block global shortcuts during text input
 
   // Actions
   navigate: (view: ViewType) => void;
+  navigateTab: (tab: TabType) => void;
   goBack: () => void;
   toggleHelp: () => void;
+  setShowHelp: (show: boolean) => void;
   setSelectedIndex: (index: number) => void;
   moveSelection: (delta: number, max: number) => void;
   notify: (message: string, type: Notification['type']) => void;
   dismissNotification: (id: string) => void;
   clearNotifications: () => void;
+  setTextInputActive: (active: boolean) => void;
 }
 
 function viewToLabel(view: ViewType): string {
@@ -40,41 +61,87 @@ function viewToLabel(view: ViewType): string {
     status: 'Status',
     orchestrator: 'Orchestrator',
     project: 'Projects',
+    queue: 'Queue',
     review: 'Review',
     config: 'Config',
+    setup: 'Setup',
     help: 'Help',
   };
   return labels[view];
 }
 
 export const useUIStore = create<UIState>((set) => ({
-  currentView: 'status',
-  breadcrumbs: ['Status'],
+  currentTab: 'project',
+  currentView: 'project',
+  breadcrumbs: [],
   history: [],
   showHelp: false,
   selectedIndex: 0,
   notifications: [],
+  isTextInputActive: false,
 
-  navigate: (view) => set((state) => ({
-    currentView: view,
-    history: [...state.history, state.currentView],
-    breadcrumbs: [...state.breadcrumbs, viewToLabel(view)],
-    selectedIndex: 0,
-  })),
+  navigateTab: (tab) => set((state) => {
+    // Switching tabs: reset breadcrumbs, start fresh
+    return {
+      currentTab: tab,
+      currentView: tab,
+      history: state.currentView !== tab ? [...state.history, state.currentView] : state.history,
+      breadcrumbs: [], // Tabs don't show in breadcrumbs
+      selectedIndex: 0,
+    };
+  }),
+
+  navigate: (view) => set((state) => {
+    const targetTab = VIEW_TO_TAB[view];
+    const isTabSwitch = TAB_VIEWS.includes(view);
+
+    if (isTabSwitch) {
+      // Navigating to a tab-level view
+      return {
+        currentTab: view as TabType,
+        currentView: view,
+        history: state.currentView !== view ? [...state.history, state.currentView] : state.history,
+        breadcrumbs: [], // Tabs don't show in breadcrumbs
+        selectedIndex: 0,
+      };
+    }
+
+    // Navigating to a nested view within current or different tab
+    const newLabel = viewToLabel(view);
+    const existingIndex = state.breadcrumbs.indexOf(newLabel);
+
+    // If already in breadcrumb trail, truncate to that point (navigating back)
+    const newBreadcrumbs = existingIndex >= 0
+      ? state.breadcrumbs.slice(0, existingIndex + 1)
+      : [...state.breadcrumbs, newLabel];
+
+    return {
+      currentTab: targetTab,
+      currentView: view,
+      history: [...state.history, state.currentView],
+      breadcrumbs: newBreadcrumbs,
+      selectedIndex: 0,
+    };
+  }),
 
   goBack: () => set((state) => {
     if (state.history.length === 0) return state;
     const newHistory = [...state.history];
     const previousView = newHistory.pop()!;
+    const previousTab = VIEW_TO_TAB[previousView];
+    const isTabView = TAB_VIEWS.includes(previousView);
+
     return {
+      currentTab: previousTab,
       currentView: previousView,
       history: newHistory,
-      breadcrumbs: state.breadcrumbs.slice(0, -1),
+      breadcrumbs: isTabView ? [] : state.breadcrumbs.slice(0, -1),
       selectedIndex: 0,
     };
   }),
 
   toggleHelp: () => set((state) => ({ showHelp: !state.showHelp })),
+  setShowHelp: (show) => set({ showHelp: show }),
 
   setSelectedIndex: (index) => set({ selectedIndex: index }),
 
@@ -99,4 +166,6 @@ export const useUIStore = create<UIState>((set) => ({
   })),
 
   clearNotifications: () => set({ notifications: [] }),
+
+  setTextInputActive: (active) => set({ isTextInputActive: active }),
 }));

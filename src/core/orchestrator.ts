@@ -9,6 +9,7 @@ import { IssueEvaluator } from './issue-evaluator.js';
 import { GitHubAPI } from '../github/api.js';
 import { GitHubProjectsAPI, ProjectItem } from '../github/projects-api.js';
 import { ProjectFieldMapper } from '../github/project-field-mapper.js';
+import { ProjectDiscovery } from '../github/project-discovery.js';
 // import { ProjectAwarePrioritizer } from './project-aware-prioritizer.js'; // Unused for now
 import { LLMAdapter } from '../llm/adapter.js';
 
@@ -21,6 +22,7 @@ import { MergeWorker } from './merge-worker.js';
 import { ReviewWorker } from './review-worker.js';
 import { EpicOrchestrator } from './epic-orchestrator.js';
 // import { PhaseConsolidationWorker } from './phase-consolidation-worker.js'; // Temporarily disabled - has compilation errors
+import { canStartWork } from '../utils/phase-dependencies.js';
 import { promises as fs, existsSync } from 'fs';
 import { join, dirname, basename } from 'path';
 import chalk from 'chalk';
@@ -124,18 +126,96 @@ export class Orchestrator {
 
     // Initialize GitHub Projects v2 integration if enabled
     if (config.project?.enabled) {
-      const projectId = await resolveProjectId(config.github.owner, config.github.repo, false);
+      // First, initialize a temporary assignment manager to load existing assignments
+      const tempAssignmentManager = new AssignmentManager(this.projectPath, {});
+      await tempAssignmentManager.initialize(config.github.owner, this.projectPath);
+      const assignments = tempAssignmentManager.getAllAssignments();
+
+      // Discover ALL unique project numbers from assignments
+      const projectNumbers = new Set<number>();
+      assignments.forEach((a: Assignment) => {
+        if (a.projectNumber) {
+          projectNumbers.add(a.projectNumber);
+        }
+      });
+
+      let projectId: string | null = null;
+      const discovery = new ProjectDiscovery(config.github.owner, config.github.repo);
+
+      // Use most common project number from assignments as primary
+      if (projectNumbers.size > 0) {
+        // Count occurrences of each project number
+        const projectCounts = new Map<number, number>();
+        assignments.forEach((a: Assignment) => {
+          if (a.projectNumber) {
+            projectCounts.set(a.projectNumber, (projectCounts.get(a.projectNumber) || 0) + 1);
+          }
+        });
+
+        // Pick the most common project as primary
+        const primaryProjectNumber = Array.from(projectCounts.entries())
+          .sort((a, b) => b[1] - a[1])[0][0];
+
+        if (projectNumbers.size > 1) {
+          console.log(chalk.blue(`   ℹ Found ${projectNumbers.size} active projects: ${Array.from(projectNumbers).join(', ')}`));
+          console.log(chalk.blue(`   ℹ Primary project (most assignments): #${primaryProjectNumber}`));
+        } else {
+          console.log(chalk.blue(`   ℹ Working on project #${primaryProjectNumber}`));
+        }
+
+        const project = await discovery.getProjectByNumber(primaryProjectNumber);
+        if (project) {
+          projectId = project.id;
+        } else {
+          console.log(chalk.yellow(`   ⚠ Could not find project #${primaryProjectNumber} in GitHub`));
+        }
+      }
+
+      // Fallback to auto-discovery (repo-linked projects only)
+      if (!projectId) {
+        projectId = await resolveProjectId(config.github.owner, config.github.repo, false);
+      }
+
       if (projectId) {
         this.projectsAPI = new GitHubProjectsAPI(projectId, config.project);
         this.fieldMapper = new ProjectFieldMapper(this.projectsAPI, config.project);
         // this.prioritizer = new ProjectAwarePrioritizer(config.project, this.fieldMapper); // Unused for now
 
-        // Ensure autonomous view exists with all required fields
-        const claudeConfig = config.llms?.claude?.enabled ? {
-          cliPath: config.llms.claude.cliPath || 'claude',
-          cliArgs: config.llms.claude.cliArgs,
-        } : undefined;
-        await this.projectsAPI.ensureAutonomousView(claudeConfig);
+        // Check if this project has already been validated
+        const primaryProjectNumber = Array.from(projectNumbers)[0];
+        const validatedProjects = config.project.validated || [];
+        const isValidated = validatedProjects.some(p => p.projectNumber === primaryProjectNumber);
+
+        if (!isValidated) {
+          console.log(chalk.blue(`   🔍 First time setup for project #${primaryProjectNumber}...`));
+
+          // Ensure autonomous view exists with all required fields
+          const claudeConfig = config.llms?.claude?.enabled ? {
+            cliPath: config.llms.claude.cliPath || 'claude',
+            cliArgs: config.llms.claude.cliArgs,
+          } : undefined;
+          await this.projectsAPI.ensureAutonomousView(claudeConfig);
+
+          // Get project name
+          const project = await discovery.getProjectByNumber(primaryProjectNumber);
+
+          // Add to validated list
+          if (!config.project.validated) {
+            config.project.validated = [];
+          }
+          config.project.validated.push({
+            projectNumber: primaryProjectNumber,
+            name: project?.title || `Project ${primaryProjectNumber}`,
+            validatedAt: new Date().toISOString(),
+            hasAutonomousView: true,
+          });
+
+          // Save config with new validated project
+          await this.configManager.save();
+          console.log(chalk.green(`   ✓ Project #${primaryProjectNumber} validated and saved`));
+        } else {
+          console.log(chalk.gray(`   ✓ Project #${primaryProjectNumber} already validated`));
+        }
 
         // Re-initialize assignment manager with project API for conflict detection
         this.assignmentManager = new AssignmentManager(this.projectPath, {
@@ -144,8 +224,8 @@ export class Orchestrator {
         await this.assignmentManager.initialize(config.github.owner, this.projectPath);
 
         console.log(chalk.green('✓ GitHub Projects v2 integration enabled'));
-      } else {
-        console.log(chalk.yellow('⚠ Project integration enabled but no project found'));
+      } else if (this.verbose) {
+        console.log(chalk.gray('   Project integration enabled (no projects discovered from assignments)'));
       }
     }
 
@@ -197,65 +277,22 @@ export class Orchestrator {
       console.log(chalk.green('✓ Merge Worker initialized' + (this.epicOrchestrator ? ' (Epic Mode)' : '')));
     }
 
-    // Initialize review worker for pre-resurrection reviews
-    if (this.githubAPI) {
+    // Initialize review worker for pre-resurrection reviews (if configured)
+    // Note: ReviewWorker is currently optional and may not be configured
+    // Uncomment when review worker configuration is added to config
+    /*
+    if (config.reviewWorker?.enabled) {
       this.reviewWorker = new ReviewWorker(
         this.projectPath,
         this.assignmentManager,
         this.githubAPI,
         config.llms?.claude?.cliPath || 'claude',
-        1, // maxConcurrent - only need 1 for resurrection reviews
+        3,
         this.fieldMapper
       );
-      if (this.verbose) {
-        console.log(chalk.green('✓ Review Worker initialized for pre-resurrection checks'));
-      }
+      console.log(chalk.green('✓ Review Worker initialized'));
     }
-
-    // Initialize epic orchestrator if epic mode is enabled
-    if (this.epicConfig && this.githubAPI && this.projectsAPI) {
-      const { Octokit } = await import('@octokit/rest');
-      const octokit = new Octokit({ auth: githubToken });
-
-      this.epicOrchestrator = new EpicOrchestrator(
-        octokit,
-        config.github.owner,
-        config.github.repo,
-        {
-          epicName: this.epicConfig.epicName,
-          currentPhase: null,
-          autoMergeToMain: this.epicConfig.autoMergeToMain,
-        },
-        this.projectsAPI || undefined,
-        this.fieldMapper || undefined
-      );
-
-      console.log(chalk.green(`✓ Epic Mode enabled: "${this.epicConfig.epicName}"`));
-      if (this.epicConfig.autoMergeToMain) {
-        console.log(chalk.green('  Auto-merge to main: ENABLED'));
-      } else {
-        console.log(chalk.gray('  Auto-merge to main: DISABLED (manual merge required)'));
-      }
-
-      // Initialize phase consolidation worker for epic mode
-      // Temporarily disabled due to compilation errors
-      // this.phaseConsolidationWorker = new PhaseConsolidationWorker(
-      //   this.assignmentManager,
-      //   this.worktreeManager,
-      //   this.epicOrchestrator,
-      //   this.projectPath,
-      //   {
-      //     enabled: true,
-      //     autoMergeToMain: this.epicConfig.autoMergeToMain,
-      //     claudePath: config.llms?.claude?.cliPath || 'claude',
-      //     mainBranch: config.mergeWorker?.mainBranch || 'main',
-      //     stageBranch: config.mergeWorker?.stageBranch || 'stage',
-      //     testCommand: config.requirements.testingRequired ? 'npm test' : undefined,
-      //   },
-      //   this.verbose
-      // );
-      // console.log(chalk.green('✓ Phase Consolidation Worker initialized'));
-    }
+    */
   }
 
   /**
@@ -271,6 +308,9 @@ export class Orchestrator {
 
     // First, check for dead processes and resurrect them
     await this.resurrectDeadAssignments();
+
+    // Start work on assigned issues that were never started
+    await this.startAssignedWork();
 
     // Comprehensive sync from GitHub to establish correct state
     if (this.projectsAPI && this.fieldMapper) {
@@ -298,18 +338,10 @@ export class Orchestrator {
       await this.cleanupNonEpicAssignments();
     }
 
-    // Perform initial evaluation and assignment
-    console.log(chalk.blue('Fetching available issues from GitHub...'));
-
-    try {
-      await this.performPeriodicEvaluationAndAssignment();
-    } catch (error) {
-      console.error(
-        chalk.yellow('⚠️  Error during initial evaluation:'),
-        error instanceof Error ? error.message : String(error)
-      );
-      console.log(chalk.yellow('Will retry in the monitoring loop...'));
-    }
+    // Skip initial evaluation/assignment on startup - let startAssignedWork() respect defaultConcurrentIssues
+    // The monitoring loop will pick up new work after the initial startup completes
+    console.log(chalk.gray('Skipping initial periodic assignment - respecting defaultConcurrentIssues setting'));
+    console.log(chalk.gray('(Monitoring loop will check for new work every 10 minutes)'));
 
     // Start monitoring loop
     this.startMonitoringLoop();
@@ -628,8 +660,11 @@ export class Orchestrator {
           console.log(chalk.yellow(`  Failed to fetch: ${fetchErrors} issues (may be from different repo or deleted)`));
         }
 
+        // Filter out locally assigned issues (double-check to prevent duplicates)
+        const filteredIssues = this.filterOutLocallyAssignedIssues(availableIssues);
+
         // Check for BLOCK_ALL items
-        return await this.handleBlockAllItems(availableIssues);
+        return await this.handleBlockAllItems(filteredIssues);
       } catch (error) {
         console.warn(chalk.yellow(`  ⚠️  Could not filter by project: ${error}`));
         // Fall through to normal issue fetching
@@ -656,8 +691,54 @@ export class Orchestrator {
       }
     }
 
+    // Filter out locally assigned issues (prevent duplicates)
+    const filteredIssues = this.filterOutLocallyAssignedIssues(issues);
+
     // Check for BLOCK_ALL items
-    return await this.handleBlockAllItems(issues);
+    return await this.handleBlockAllItems(filteredIssues);
+  }
+
+  /**
+   * Filter out issues that are already locally assigned
+   * Prevents duplicate assignments by checking local assignment state
+   */
+  private filterOutLocallyAssignedIssues(issues: Issue[]): Issue[] {
+    const filtered: Issue[] = [];
+    let skippedCount = 0;
+
+    for (const issue of issues) {
+      const existingAssignment = this.assignmentManager.getAssignmentByIssue(issue.number);
+
+      // Skip if already assigned or in progress
+      if (existingAssignment &&
+          (existingAssignment.status === 'assigned' ||
+           existingAssignment.status === 'in-progress')) {
+        skippedCount++;
+        if (this.verbose) {
+          console.log(chalk.yellow(`  Skipping #${issue.number}: already ${existingAssignment.status} (${existingAssignment.llmInstanceId})`));
+        }
+        continue;
+      }
+
+      // Skip if already completed
+      if (existingAssignment &&
+          (existingAssignment.status === 'dev-complete' ||
+           existingAssignment.status === 'merged')) {
+        skippedCount++;
+        if (this.verbose) {
+          console.log(chalk.yellow(`  Skipping #${issue.number}: already ${existingAssignment.status}`));
+        }
+        continue;
+      }
+
+      filtered.push(issue);
+    }
+
+    if (skippedCount > 0 && !this.verbose) {
+      console.log(chalk.gray(`  Filtered out ${skippedCount} already-assigned issue(s)`));
+    }
+
+    return filtered;
   }
 
   /**
@@ -891,70 +972,140 @@ export class Orchestrator {
    * Create and start an assignment
    */
   private async createAssignment(provider: LLMProvider, issue: Issue, projectName: string): Promise<void> {
-    // Check if already assigned AND has running process
+    const config = this.configManager.getConfig();
+    let assignment: Assignment | null = null;
+    let worktreePath: string | null = null;
+    let branchName: string | null = null;
+    let isPhaseMaster = false;
+    let usingExistingWorktree = false;
+
+    // Check if already assigned
     const existingAssignment = this.assignmentManager.getAssignmentByIssue(issue.number);
 
     if (existingAssignment) {
-      // Check if process is actually running
-      let processRunning = false;
-      if (existingAssignment.processId) {
-        processRunning = isProcessRunning(existingAssignment.processId);
-      }
+      // If assignment is in active status (assigned/in-progress), don't allow re-assignment
+      if (existingAssignment.status === 'assigned' || existingAssignment.status === 'in-progress') {
+        // Check if process is actually running
+        let processRunning = false;
+        if (existingAssignment.processId) {
+          processRunning = isProcessRunning(existingAssignment.processId);
+        }
 
-      if (processRunning) {
-        console.log(chalk.yellow(`Issue #${issue.number} is already assigned with running process, skipping...`));
+        if (processRunning) {
+          console.log(chalk.yellow(`⚠️  Issue #${issue.number} already assigned to ${existingAssignment.llmInstanceId} (process running), skipping...`));
+          return;
+        } else if (existingAssignment.worktreePath && existsSync(existingAssignment.worktreePath)) {
+          // Assignment exists with valid worktree but no running process
+          // This could be a queued assignment waiting to start
+          console.log(chalk.yellow(`⚠️  Issue #${issue.number} already assigned to ${existingAssignment.llmInstanceId} (worktree exists, status: ${existingAssignment.status}), skipping...`));
+          return;
+        } else {
+          // Process is dead and worktree is invalid - clean up and allow reassignment
+          console.log(chalk.yellow(`Issue #${issue.number} has stale assignment (worktree missing), cleaning up...`));
+          await this.assignmentManager.deleteAssignment(existingAssignment.id);
+        }
+      } else if (existingAssignment.status === 'dev-complete' || existingAssignment.status === 'merged') {
+        // Completed assignments should not be reassigned
+        console.log(chalk.yellow(`⚠️  Issue #${issue.number} already completed (status: ${existingAssignment.status}), skipping...`));
         return;
       } else {
-        // Process is dead or never started - clean up and reassign
-        console.log(chalk.yellow(`Issue #${issue.number} has stale assignment, cleaning up and reassigning...`));
-        await this.assignmentManager.deleteAssignment(existingAssignment.id);
+        // Other statuses (queued, etc.) - clean up if worktree missing
+        if (!existingAssignment.worktreePath || !existsSync(existingAssignment.worktreePath)) {
+          console.log(chalk.yellow(`Issue #${issue.number} has stale assignment, cleaning up...`));
+          await this.assignmentManager.deleteAssignment(existingAssignment.id);
+        }
       }
     }
 
-    // Event logging
-    this.logEvent('🎯', `Assigned #${issue.number} to ${provider}`, issue.title);
+    // Discover which project this issue belongs to (if any)
+    let projectNumber: number | undefined;
+    let issueUrl: string | undefined = issue.htmlUrl; // Default to GitHub issue URL if available
+    if (!usingExistingWorktree && this.projectsAPI) {
+      try {
+        const allItems = await this.projectsAPI.getAllItems();
+        const projectItem = allItems.find(item => item.content.number === issue.number);
 
-    const config = this.configManager.getConfig();
+        if (projectItem) {
+          // Store the issue URL from the project item
+          issueUrl = projectItem.content.url;
 
-    // Generate branch name
-    const branchName = `${config.worktree.branchPrefix || 'feature/issue-'}${issue.number}-${this.slugify(issue.title)}`;
+          // This issue belongs to a project - discover the project number dynamically
+          const discoveredProjectNumber = await this.projectsAPI.getProjectNumberForItem(projectItem.id);
+          projectNumber = discoveredProjectNumber ?? undefined;
 
-    // Create worktree
-    console.log('Creating worktree...');
-    let worktreePath: string;
-    try {
-      worktreePath = await this.worktreeManager.createWorktree({
+          if (projectNumber) {
+            console.log(chalk.blue(`✓ Issue #${issue.number} belongs to project #${projectNumber}`));
+
+            // Look for any existing assignment from the same project
+            const existingProjectAssignment = Array.from(this.assignmentManager.getAllAssignments())
+              .find(a => a.projectNumber === projectNumber && a.worktreePath && existsSync(a.worktreePath));
+
+            if (existingProjectAssignment) {
+              console.log(chalk.blue(`  Using existing project worktree: ${existingProjectAssignment.worktreePath}`));
+              worktreePath = existingProjectAssignment.worktreePath;
+              branchName = existingProjectAssignment.branchName;
+              isPhaseMaster = PromptBuilder.isPhaseMaster(issue.title);
+              usingExistingWorktree = true;
+            }
+          }
+        }
+      } catch (error) {
+        console.log(chalk.gray(`Could not check project membership: ${error instanceof Error ? error.message : String(error)}`));
+      }
+    }
+
+    // Only create worktree and assignment if we're not using existing
+    if (!usingExistingWorktree) {
+      // Event logging
+      this.logEvent('🎯', `Assigned #${issue.number} to ${provider}`, issue.title);
+
+      // Generate branch name
+      branchName = `${config.worktree.branchPrefix || 'feature/issue-'}${issue.number}-${this.slugify(issue.title)}`;
+
+      // Create worktree
+      console.log('Creating worktree...');
+      try {
+        worktreePath = await this.worktreeManager.createWorktree({
+          issueNumber: issue.number,
+          branchName,
+          baseDir: config.worktree.baseDir,
+          projectName,
+          baseBranch: await this.worktreeManager.getDefaultBranch(),
+        });
+        console.log(chalk.green(`✓ Worktree created: ${worktreePath}`));
+      } catch (error) {
+        console.log(chalk.yellow(`⚠️  Could not create worktree: ${error instanceof Error ? error.message : String(error)}`));
+        console.log(chalk.yellow(`   Skipping issue #${issue.number}`));
+        return;
+      }
+
+      // Detect if this is a phase master issue
+      isPhaseMaster = PromptBuilder.isPhaseMaster(issue.title);
+      if (isPhaseMaster && this.verbose) {
+        console.log(chalk.blue('📋 Phase Master detected - will use coordination workflow'));
+      }
+
+      // Create assignment
+      assignment = await this.assignmentManager.createAssignment({
         issueNumber: issue.number,
+        issueTitle: issue.title,
+        issueBody: issue.body ?? undefined,
+        issueUrl, // Pass issue URL for easy reference
+        llmProvider: provider,
+        worktreePath,
         branchName,
-        baseDir: config.worktree.baseDir,
-        projectName,
-        baseBranch: await this.worktreeManager.getDefaultBranch(),
+        projectNumber, // Pass discovered project number for multi-project support
+        requiresTests: config.requirements.testingRequired,
+        requiresCI: config.requirements.ciMustPass,
+        // NOTE: labels removed - read from GitHub/project instead
       });
-      console.log(chalk.green(`✓ Worktree created: ${worktreePath}`));
-    } catch (error) {
-      console.log(chalk.yellow(`⚠️  Could not create worktree: ${error instanceof Error ? error.message : String(error)}`));
-      console.log(chalk.yellow(`   Skipping issue #${issue.number}`));
+    }
+
+    // Ensure assignment and worktree are set
+    if (!assignment || !worktreePath || !branchName) {
+      console.log(chalk.yellow(`⚠️  Failed to set up assignment for #${issue.number}, skipping...`));
       return;
     }
-
-    // Detect if this is a phase master issue
-    const isPhaseMaster = PromptBuilder.isPhaseMaster(issue.title);
-    if (isPhaseMaster && this.verbose) {
-      console.log(chalk.blue('📋 Phase Master detected - will use coordination workflow'));
-    }
-
-    // Create assignment
-    const assignment = await this.assignmentManager.createAssignment({
-      issueNumber: issue.number,
-      issueTitle: issue.title,
-      issueBody: issue.body ?? undefined,
-      llmProvider: provider,
-      worktreePath,
-      branchName,
-      requiresTests: config.requirements.testingRequired,
-      requiresCI: config.requirements.ciMustPass,
-      // NOTE: labels removed - read from GitHub/project instead
-    });
 
     // Set phase master flag in metadata
     if (isPhaseMaster && assignment.metadata) {
@@ -980,6 +1131,37 @@ export class Orchestrator {
         } catch (error) {
           console.log(chalk.yellow(`⚠️  Could not assign to @${assigneeUsername}: ${error instanceof Error ? error.message : String(error)}`));
         }
+      }
+    }
+
+    // CHECK PHASE DEPENDENCIES before starting work
+    if (this.projectsAPI) {
+      try {
+        // Get all project items for dependency checking
+        const allItems = await this.projectsAPI.getAllItems();
+
+        // Find the project item for this issue
+        const projectItem = allItems.find(item => item.content.number === issue.number);
+
+        if (projectItem) {
+          const { canStart, reason } = canStartWork(projectItem, allItems);
+
+          if (!canStart) {
+            // Dependencies not met - leave in 'assigned' status (queued)
+            console.log(chalk.yellow(`⏸️  Item #${issue.number} queued - dependencies not met`));
+            console.log(chalk.gray(`   Reason: ${reason}`));
+            console.log(chalk.blue(`   Will auto-start when dependencies are satisfied\n`));
+
+            // Update project status to show it's queued
+            await this.assignmentManager.updateStatusWithSync(assignment.id, 'assigned');
+            await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, `queued:pending`);
+
+            return; // Exit early - don't start the LLM process
+          }
+        }
+      } catch (error) {
+        console.warn(chalk.yellow(`⚠️  Could not check phase dependencies: ${error instanceof Error ? error.message : String(error)}`));
+        console.log(chalk.gray('   Proceeding with assignment anyway...'));
       }
     }
 
@@ -1012,6 +1194,12 @@ export class Orchestrator {
     //   return;
     // }
 
+    // Dependencies met - proceed to start work
+    console.log(chalk.green(`✓ Dependencies satisfied - starting work on #${issue.number}`));
+
+    // Assignment already has llmInstanceId set by createAssignment()
+    const instanceId = assignment.llmInstanceId;
+
     // Generate initial prompt
     const prompt = PromptBuilder.buildInitialPrompt({
       assignment,
@@ -1025,14 +1213,19 @@ export class Orchestrator {
       throw new Error(`Adapter for ${provider} not found`);
     }
 
-    await adapter.start({
+    const returnedInstanceId = await adapter.start({
       assignment,
       prompt,
       workingDirectory: worktreePath,
     });
 
+    // Verify the adapter returned the same instance ID
+    if (returnedInstanceId !== instanceId) {
+      console.warn(chalk.yellow(`⚠️  Adapter returned different instanceId: ${returnedInstanceId} vs ${instanceId}`));
+    }
+
     // Get the process ID
-    const status = await adapter.getStatus(assignment.llmInstanceId);
+    const status = await adapter.getStatus(instanceId);
     const processId = status?.processId;
 
     // Update assignment with PID and status (with project sync if enabled)
@@ -1044,11 +1237,11 @@ export class Orchestrator {
       // Set status and sync to GitHub
       await this.assignmentManager.updateStatusWithSync(assignment.id, 'in-progress');
       // Update "Assigned Instance" field in GitHub Project
-      await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, assignment.llmInstanceId);
+      await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, instanceId);
 
       // Epic Mode: If this is a phase master, assign all work items in the phase to same instance
       if (this.epicOrchestrator && isPhaseMaster) {
-        await this.assignPhaseWorkItems(assignment, assignment.llmInstanceId);
+        await this.assignPhaseWorkItems(assignment, instanceId);
       }
     } else {
       await this.assignmentManager.updateAssignment(assignment.id, {
@@ -1112,7 +1305,7 @@ export class Orchestrator {
     }
 
     // Filter for Phase N.x work items (not the master)
-    const phasePattern = new RegExp(`Phase\s+${phaseNumber}\\.\\d+`, 'i');
+    const phasePattern = new RegExp(`Phase\\s+${phaseNumber}\\.\\d+`, 'i');
     const epicPattern = new RegExp(epicName, 'i');
 
     const phaseWorkItems: Array<{ issueNumber: number; title: string; projectItemId: string }> = [];
@@ -1159,6 +1352,109 @@ export class Orchestrator {
   }
 
   /**
+   * Check queued assignments and start work when dependencies are met
+   * Called periodically from monitoring loop
+   */
+  private async startQueuedAssignments(): Promise<void> {
+    if (!this.projectsAPI) {
+      return; // No project integration, no dependency checking
+    }
+
+    // Get all assignments in 'assigned' status (queued)
+    const queuedAssignments = this.assignmentManager
+      .getAllAssignments()
+      .filter(a => a.status === 'assigned');
+
+    if (queuedAssignments.length === 0) {
+      return; // No queued items
+    }
+
+    if (this.verbose) {
+      console.log(chalk.gray(`\n  🔄 Checking ${queuedAssignments.length} queued assignment(s) for ready items...`));
+    }
+
+    try {
+      // Get all project items for dependency checking
+      const allItems = await this.projectsAPI.getAllItems();
+
+      for (const assignment of queuedAssignments) {
+        // Find the project item for this assignment
+        const projectItem = allItems.find(item => item.content.number === assignment.issueNumber);
+
+        if (!projectItem) {
+          if (this.verbose) {
+            console.log(chalk.yellow(`  ⚠️  Project item not found for #${assignment.issueNumber}`));
+          }
+          continue;
+        }
+
+        // Check if dependencies are now met
+        const { canStart, reason } = canStartWork(projectItem, allItems);
+
+        if (canStart) {
+          // Dependencies met - start the work!
+          console.log(chalk.green(`\n✅ Dependencies satisfied for queued item #${assignment.issueNumber}`));
+          console.log(chalk.blue(`   Starting work now...\n`));
+
+          // Generate prompt and start LLM instance
+          const prompt = PromptBuilder.buildInitialPrompt({
+            assignment,
+            worktreePath: assignment.worktreePath,
+          });
+
+          const adapter = this.adapters.get(assignment.llmProvider);
+          if (!adapter) {
+            console.error(chalk.red(`  ❌ Adapter for ${assignment.llmProvider} not found`));
+            continue;
+          }
+
+          try {
+            await adapter.start({
+              assignment,
+              prompt,
+              workingDirectory: assignment.worktreePath,
+            });
+
+            // Get the process ID
+            const status = await adapter.getStatus(assignment.llmInstanceId);
+            const processId = status?.processId;
+
+            // Update assignment with PID and status
+            await this.assignmentManager.updateAssignment(assignment.id, {
+              processId,
+            });
+
+            // Update status to in-progress and sync to GitHub
+            await this.assignmentManager.updateStatusWithSync(assignment.id, 'in-progress');
+            await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, assignment.llmInstanceId);
+
+            // Add work session
+            await this.assignmentManager.addWorkSession(assignment.id, {
+              startedAt: new Date().toISOString(),
+              promptUsed: prompt,
+            });
+
+            console.log(chalk.green(`✓ Started work on previously queued item #${assignment.issueNumber}\n`));
+          } catch (error) {
+            console.error(
+              chalk.red(`Failed to start queued assignment #${assignment.issueNumber}:`),
+              error instanceof Error ? error.message : String(error)
+            );
+          }
+        } else if (this.verbose) {
+          // Still blocked - log reason
+          console.log(chalk.gray(`  ⏸️  #${assignment.issueNumber} still waiting: ${reason}`));
+        }
+      }
+    } catch (error) {
+      console.warn(
+        chalk.yellow('⚠️  Error checking queued assignments:'),
+        error instanceof Error ? error.message : String(error)
+      );
+    }
+  }
+
+  /**
    * Monitoring loop
    * Checks for completion via hooks (primary) and dead processes (fallback)
    * Syncs from GitHub periodically to detect manual status changes
@@ -1166,6 +1462,7 @@ export class Orchestrator {
   private async startMonitoringLoop(): Promise<void> {
     console.log(chalk.blue('\nStarting monitoring loop...\n'));
     console.log(chalk.gray('  Checking for completion every 60s'));
+    console.log(chalk.gray('  Checking queued assignments for dependency satisfaction every 60s'));
     console.log(chalk.gray('  Checking for dead processes every 3m'));
     console.log(chalk.gray('  Syncing from GitHub every 5m\n'));
 
@@ -1176,6 +1473,9 @@ export class Orchestrator {
     while (this.isRunning) {
       try {
         await this.checkAssignments();
+
+        // Check queued assignments and start work when dependencies are met
+        await this.startQueuedAssignments();
 
         // Process dev-complete items with merge worker
         if (this.mergeWorker) {
@@ -1374,22 +1674,9 @@ export class Orchestrator {
       await this.checkAssignment(assignment);
     }
 
-    // Check for dev-complete assignments - these free up LLM slots for new work
-    const devCompleteAssignments = this.assignmentManager.getAssignmentsByStatus('dev-complete');
-    if (devCompleteAssignments.length > 0) {
-      try {
-        // Fetch new issues and assign (dev-complete items no longer use LLM resources)
-        const issues = await this.fetchAvailableIssues();
-        if (issues.length > 0) {
-          await this.assignIssues(issues);
-        }
-      } catch (error) {
-        console.error(
-          chalk.yellow('⚠️  Error fetching available issues (will retry next cycle):'),
-          error instanceof Error ? error.message : String(error)
-        );
-      }
-    }
+    // NOTE: Auto-assignment removed - orchestrator now only works with explicitly assigned issues
+    // Dev-complete assignments free up LLM slots, but new work must be assigned via UI/CLI
+    // This prevents the orchestrator from fetching all GitHub issues during monitoring loop
   }
 
   /**
@@ -2160,9 +2447,10 @@ The autonomous system is resuming work on this issue. The LLM will address the r
 
           // PTY mode handles real-time output directly (no log monitoring needed)
         } else if (!status.processId) {
-          console.log(chalk.yellow(`\n⚠️  No process ID for issue #${assignment.issueNumber}`));
-          console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
-          console.log(chalk.blue(`   Starting process...`));
+          if (this.verbose) {
+            console.log(chalk.gray(`   Resuming work on issue #${assignment.issueNumber}`));
+            console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
+          }
 
           // This assignment never had a process started (pre-fix zombie)
           const prompt = PromptBuilder.buildContinuationPrompt({
@@ -2274,6 +2562,157 @@ The autonomous system is resuming work on this issue. The LLM will address the r
       console.log('');
     } else {
       console.log(chalk.green('✓ All processes are running\n'));
+    }
+  }
+
+  /**
+   * Start work on assignments that were assigned but never started
+   * (status = "assigned" with no processId)
+   * Respects maxConcurrentIssues limits for each provider
+   */
+  private async startAssignedWork(): Promise<void> {
+    const assignedWork = this.assignmentManager.getAssignmentsByStatus('assigned');
+
+    if (assignedWork.length === 0) {
+      if (this.verbose) {
+        console.log(chalk.gray('No assigned work waiting to start'));
+      }
+      return;
+    }
+
+    console.log(chalk.blue(`\n🚀 Starting work on ${assignedWork.length} assigned issue(s)...\n`));
+
+    // Group assignments by provider
+    const byProvider = new Map<LLMProvider, Assignment[]>();
+    for (const assignment of assignedWork) {
+      const provider = assignment.llmProvider;
+      if (!byProvider.has(provider)) {
+        byProvider.set(provider, []);
+      }
+      byProvider.get(provider)!.push(assignment);
+    }
+
+    let totalStarted = 0;
+
+    // Process each provider's assignments respecting capacity limits
+    for (const [provider, assignments] of byProvider.entries()) {
+      const adapter = this.adapters.get(provider);
+      if (!adapter) {
+        console.warn(chalk.yellow(`  ⚠️  No adapter found for ${provider} (skipping ${assignments.length} issue(s))`));
+        continue;
+      }
+
+      // Check available capacity for this provider
+      const llmConfig = this.configManager.getLLMConfig(provider);
+      const activeCount = await this.assignmentManager.getActiveAssignmentsCount(provider);
+      const available = llmConfig.maxConcurrentIssues - activeCount;
+
+      if (available <= 0) {
+        console.log(chalk.gray(`  ${provider}: at capacity (${activeCount}/${llmConfig.maxConcurrentIssues}) - skipping ${assignments.length} assigned issue(s)`));
+        continue;
+      }
+
+      // Use defaultConcurrentIssues to control initial startup count (default: 1)
+      const defaultCount = llmConfig.defaultConcurrentIssues ?? 1;
+      const toStart = Math.min(defaultCount, available, assignments.length);
+
+      console.log(chalk.blue(`  ${provider}: ${available} slot(s) available, starting ${toStart} issue(s) (default startup count: ${defaultCount})`));
+
+      // Start assignments up to default startup count
+      let started = 0;
+      for (const assignment of assignments) {
+        if (started >= toStart) {
+          console.log(chalk.gray(`  ${provider}: startup complete, ${assignments.length - started} issue(s) remain assigned`));
+          break;
+        }
+
+        try {
+          console.log(chalk.blue(`    Starting #${assignment.issueNumber}: ${assignment.issueTitle}`));
+          console.log(chalk.gray(`     Worktree: ${assignment.worktreePath}`));
+
+          // Build initial prompt
+          const prompt = PromptBuilder.buildInitialPrompt({
+            assignment,
+            worktreePath: assignment.worktreePath,
+          });
+
+          // Start the LLM instance
+          const instanceId = await adapter.start({
+            assignment,
+            prompt,
+            workingDirectory: assignment.worktreePath,
+          });
+
+          // Get process status
+          const status = await adapter.getStatus(instanceId);
+
+          // Update assignment fields
+          assignment.llmInstanceId = instanceId;
+          assignment.processId = status.processId;
+          assignment.status = 'in-progress';
+          assignment.startedAt = new Date().toISOString();
+          assignment.lastActivity = new Date().toISOString();
+
+          // Save via assignment manager
+          await this.assignmentManager.updateAssignment(assignment.id, {
+            llmInstanceId: instanceId,
+            processId: status.processId,
+            status: 'in-progress',
+            lastActivity: new Date().toISOString(),
+          });
+
+          // Update GitHub project status to In Progress
+          if (this.projectsAPI && assignment.projectItemId) {
+            try {
+              await this.projectsAPI.updateItemStatusByValue(
+                assignment.projectItemId,
+                'In Progress'
+              );
+
+              // Update Assigned Instance field
+              const config = this.configManager.getConfig();
+              const assignedInstanceField = config.project?.fields.assignedInstance;
+              if (assignedInstanceField) {
+                await this.projectsAPI.updateItemTextField(
+                  assignment.projectItemId,
+                  assignedInstanceField.fieldName,
+                  instanceId
+                );
+              }
+            } catch (error) {
+              if (this.verbose) {
+                console.log(chalk.yellow(`     ⚠️  Could not update project status: ${error}`));
+              }
+            }
+          }
+
+          // Add initial work session
+          await this.assignmentManager.addWorkSession(assignment.id, {
+            startedAt: new Date().toISOString(),
+            promptUsed: prompt,
+          });
+
+          console.log(chalk.green(`     ✓ Started with instance: ${instanceId} (PID: ${status.processId || 'N/A'})`));
+          started++;
+          totalStarted++;
+
+          // Wait 2 seconds between starts to avoid overwhelming the system
+          if (started < toStart) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+          }
+        } catch (error) {
+          console.error(
+            chalk.red(`     ✗ Failed to start issue #${assignment.issueNumber}:`),
+            error instanceof Error ? error.message : String(error)
+          );
+        }
+      }
+    }
+
+    if (totalStarted > 0) {
+      console.log(chalk.green(`\n✓ Started ${totalStarted}/${assignedWork.length} assignment(s)\n`));
+    } else {
+      console.log(chalk.yellow('\n⚠️  No assignments started (all providers at capacity)\n'));
     }
   }
 

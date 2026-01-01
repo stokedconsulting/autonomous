@@ -22,6 +22,7 @@ interface AddLLMOptions {
   cliArgs?: string;
   apiKey?: string;
   maxConcurrent?: number;
+  concurrent?: number;
   enableHooks?: boolean;
 }
 
@@ -129,7 +130,7 @@ async function init(options: InitOptions): Promise<void> {
             // Add project configuration with sensible defaults
             config.project = {
               enabled: true,
-              projectNumber: 0, // Will be resolved dynamically
+              validated: [], // Track validated projects
               organizationProject: true, // Assume org project (can be overridden)
               fields: {
                 status: {
@@ -169,7 +170,7 @@ async function init(options: InitOptions): Promise<void> {
 
           // Always try to create/ensure Autonomous view exists
           const { GitHubProjectsAPI } = await import('../../github/projects-api.js');
-          const projectsAPI = new GitHubProjectsAPI(projectId, config.project);
+          const projectsAPI = new GitHubProjectsAPI(projectId, config.project!);
 
           // Pass Claude config for browser automation
           const claudeConfig = config.llms?.claude?.enabled ? {
@@ -232,12 +233,30 @@ async function addLLM(provider: string, options: AddLLMOptions): Promise<void> {
       ? options.cliArgs.split(' ').filter(arg => arg.length > 0)
       : undefined;
 
+    // Validate concurrent vs maxConcurrent
+    if (options.concurrent !== undefined && options.maxConcurrent !== undefined) {
+      if (options.concurrent > options.maxConcurrent) {
+        console.error(chalk.red(`Error: --concurrent (${options.concurrent}) cannot be greater than --max-concurrent (${options.maxConcurrent})`));
+        process.exit(1);
+      }
+    } else if (options.concurrent !== undefined) {
+      // If concurrent is set but maxConcurrent is not, check against existing config
+      const existingConfig = configManager.getConfig();
+      const existingMax = existingConfig.llms[parsedProvider]?.maxConcurrentIssues;
+      if (existingMax !== undefined && options.concurrent > existingMax) {
+        console.error(chalk.red(`Error: --concurrent (${options.concurrent}) cannot be greater than existing --max-concurrent (${existingMax})`));
+        console.log(chalk.yellow('Set a higher --max-concurrent value or lower --concurrent value'));
+        process.exit(1);
+      }
+    }
+
     // Build update object, only including fields that were explicitly provided
     const updateConfig: Partial<LLMConfig> = {};
     if (options.cliPath) updateConfig.cliPath = options.cliPath;
     if (cliArgs) updateConfig.cliArgs = cliArgs;
     if (options.apiKey) updateConfig.apiKey = options.apiKey;
     if (options.maxConcurrent) updateConfig.maxConcurrentIssues = options.maxConcurrent;
+    if (options.concurrent !== undefined) updateConfig.defaultConcurrentIssues = options.concurrent;
     if (options.enableHooks !== undefined) updateConfig.hooksEnabled = options.enableHooks;
 
     // Enable the LLM with provided options
@@ -287,6 +306,22 @@ async function useLLM(provider: string, options: AddLLMOptions): Promise<void> {
       ? options.cliArgs.split(' ').filter(arg => arg.length > 0)
       : undefined;
 
+    // Validate concurrent vs maxConcurrent
+    if (options.concurrent !== undefined && options.maxConcurrent !== undefined) {
+      if (options.concurrent > options.maxConcurrent) {
+        console.error(chalk.red(`Error: --concurrent (${options.concurrent}) cannot be greater than --max-concurrent (${options.maxConcurrent})`));
+        process.exit(1);
+      }
+    } else if (options.concurrent !== undefined) {
+      // If concurrent is set but maxConcurrent is not, check against existing config
+      const existingMax = config.llms[parsedProvider]?.maxConcurrentIssues;
+      if (existingMax !== undefined && options.concurrent > existingMax) {
+        console.error(chalk.red(`Error: --concurrent (${options.concurrent}) cannot be greater than existing --max-concurrent (${existingMax})`));
+        console.log(chalk.yellow('Set a higher --max-concurrent value or lower --concurrent value'));
+        process.exit(1);
+      }
+    }
+
     // Disable all other providers
     for (const providerKey of Object.keys(config.llms) as LLMProvider[]) {
       config.llms[providerKey].enabled = providerKey === parsedProvider;
@@ -306,6 +341,10 @@ async function useLLM(provider: string, options: AddLLMOptions): Promise<void> {
 
     if (options.maxConcurrent) {
       providerConfig.maxConcurrentIssues = options.maxConcurrent;
+    }
+
+    if (options.concurrent !== undefined) {
+      providerConfig.defaultConcurrentIssues = options.concurrent;
     }
 
     if (options.apiKey) {

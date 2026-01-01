@@ -59,6 +59,24 @@ These signals are critical for the autonomous system to detect your completion s
   }
 
   /**
+   * Format latest failed review feedback (if present) for the prompt
+   */
+  private static formatFailedReviewNote(assignment: Assignment): string {
+    const feedback = assignment.metadata?.failedReviewFeedback;
+    if (!feedback) {
+      return '';
+    }
+
+    const reviewedAt = assignment.metadata?.failedReviewAt
+      ? new Date(assignment.metadata.failedReviewAt).toISOString()
+      : null;
+
+    const timestamp = reviewedAt ? `\n(From failed review at ${reviewedAt})` : '';
+
+    return `\n\nLatest failed review feedback — fix these before resubmitting:${timestamp}\n${feedback}\n`;
+  }
+
+  /**
    * Detect if an issue is a phase master based on title
    * Phase master detection:
    * - Title contains "MASTER" keyword (required)
@@ -106,11 +124,13 @@ These signals are critical for the autonomous system to detect your completion s
       return this.buildPhaseWorkItemPrompt(context);
     }
 
+    const failedReviewNote = this.formatFailedReviewNote(assignment);
+
     return `You are working autonomously on GitHub issue #${assignment.issueNumber}: ${assignment.issueTitle}
-
+${assignment.issueUrl ? `Issue URL: ${assignment.issueUrl}\n` : ''}
 Issue Details:
-${assignment.issueBody || 'No description provided'}
-
+${assignment.issueBody || 'No description provided'}${failedReviewNote}
+${assignment.issueUrl && !assignment.issueBody ? '\nFetch full issue details from the URL above if needed for context.\n' : ''}
 Requirements:
 1. Create a feature branch (already done: ${assignment.branchName})
 2. Implement the requested functionality
@@ -139,10 +159,13 @@ ${this.getCompletionSignalInstructions()}`;
   static buildPhaseMasterPrompt(context: PromptContext): string {
     const { assignment, worktreePath } = context;
 
-    return `You are coordinating a phase master issue #${assignment.issueNumber}: ${assignment.issueTitle}
+    const failedReviewNote = this.formatFailedReviewNote(assignment);
 
+    return `You are coordinating a phase master issue #${assignment.issueNumber}: ${assignment.issueTitle}
+${assignment.issueUrl ? `Issue URL: ${assignment.issueUrl}\n` : ''}
 Issue Details:
-${assignment.issueBody || 'No description provided'}
+${assignment.issueBody || 'No description provided'}${failedReviewNote}
+${assignment.issueUrl && !assignment.issueBody ? '\nFetch full issue details from the URL above if needed for context.\n' : ''}
 
 IMPORTANT: This is a PHASE MASTER issue, not a regular implementation task.
 
@@ -180,10 +203,13 @@ ${this.getCompletionSignalInstructions()}`;
   static buildPhaseWorkItemPrompt(context: PromptContext): string {
     const { assignment, worktreePath } = context;
 
-    return `You are working autonomously on GitHub issue #${assignment.issueNumber}: ${assignment.issueTitle}
+    const failedReviewNote = this.formatFailedReviewNote(assignment);
 
+    return `You are working autonomously on GitHub issue #${assignment.issueNumber}: ${assignment.issueTitle}
+${assignment.issueUrl ? `Issue URL: ${assignment.issueUrl}\n` : ''}
 Issue Details:
-${assignment.issueBody || 'No description provided'}
+${assignment.issueBody || 'No description provided'}${failedReviewNote}
+${assignment.issueUrl && !assignment.issueBody ? '\nFetch full issue details from the URL above if needed for context.\n' : ''}
 
 IMPORTANT: This is a PHASE WORK ITEM. Your changes will be merged into the phase master branch.
 
@@ -220,15 +246,21 @@ ${this.getCompletionSignalInstructions(true)}`;
     lastSummary?: string;
   }): string {
     const { assignment, worktreePath, lastSummary } = context;
+    const failedReviewNote = this.formatFailedReviewNote(assignment);
 
-    let prompt = `Your previous session was interrupted. Resuming work on GitHub issue #${assignment.issueNumber}: ${assignment.issueTitle}\n\n`;
+    let prompt = `Your previous session was interrupted. Resuming work on GitHub issue #${assignment.issueNumber}: ${assignment.issueTitle}\n`;
+    if (assignment.issueUrl) {
+      prompt += `Issue URL: ${assignment.issueUrl}\n`;
+    }
+    prompt += `\n`;
 
     if (lastSummary) {
       prompt += `Last session summary:\n${lastSummary}\n\n`;
     }
 
     prompt += `Issue Details:
-${assignment.issueBody || 'No description provided'}
+${assignment.issueBody || 'No description provided'}${failedReviewNote}
+${assignment.issueUrl && !assignment.issueBody ? '\nFetch full issue details from the URL above if needed for context.\n' : ''}
 
 Your working directory is: ${worktreePath}
 Branch: ${assignment.branchName}

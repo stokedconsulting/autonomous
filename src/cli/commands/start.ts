@@ -17,7 +17,10 @@ interface StartOptions {
   mergeMain?: boolean;    // Auto-merge to main (vs manual approval)
 }
 
-export async function startCommand(options: StartOptions): Promise<void> {
+export async function startCommand(options: StartOptions & { ui?: boolean }): Promise<void> {
+  const hasTTY = Boolean(process.stdout.isTTY && process.stdin.isTTY);
+  const shouldUseInkUI = options.ui !== false && hasTTY && !options.verbose;
+
   try {
     const cwd = process.cwd();
     const projectName = basename(cwd);
@@ -130,9 +133,6 @@ export async function startCommand(options: StartOptions): Promise<void> {
     }
 
     // Initialize orchestrator
-    if (options.verbose) {
-      console.log('Starting orchestrator...');
-    }
     const orchestrator = new Orchestrator(
       cwd,
       configManager,
@@ -140,6 +140,34 @@ export async function startCommand(options: StartOptions): Promise<void> {
       options.verbose,
       options.epic ? { epicName: options.epic, autoMergeToMain: options.mergeMain ?? false } : undefined
     );
+
+    // Use Ink UI for interactive monitoring (unless --verbose or no TTY)
+    if (shouldUseInkUI) {
+      try {
+        const { renderOrchestratorMonitor } = await import('../../ui/apps/index.js');
+
+        await renderOrchestratorMonitor({
+          orchestrator,
+          configManager,
+          assignmentManager,
+          verbose: options.verbose,
+          dryRun: options.dryRun,
+        });
+        return;
+      } catch (error) {
+        console.error(chalk.red('\n✗ Error starting interactive UI:'), error instanceof Error ? error.message : String(error));
+        console.log(chalk.yellow('Falling back to non-interactive mode...\n'));
+        // Fall through to console mode
+      }
+    } else if (!hasTTY && options.ui !== false) {
+      console.log(chalk.yellow('⚠️  TTY not detected; run with --no-ui to skip this warning.'));
+    }
+
+    // Console mode (fallback or when --verbose)
+    if (options.verbose) {
+      console.log('Starting orchestrator...');
+    }
+
     await orchestrator.initialize();
 
     if (options.dryRun) {

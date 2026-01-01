@@ -37,7 +37,7 @@ export class ClaudePrintExecutor {
       this.logStream.write(header);
 
       // Prepare environment - exclude API key to force desktop mode
-      const { ANTHROPIC_API_KEY, ...cleanEnv } = process.env;
+      const { ANTHROPIC_API_KEY: _ANTHROPIC_API_KEY, ...cleanEnv } = process.env;
 
       const baseArgs = claudeArgs && claudeArgs.length > 0
         ? claudeArgs

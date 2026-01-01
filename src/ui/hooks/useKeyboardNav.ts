@@ -4,6 +4,7 @@
 
 import { useInput } from 'ink';
 import { useUIStore } from '../stores/ui-store.js';
+import { debugLog } from '../../utils/debug-logger.js';
 
 interface KeyHandler {
   key: string;
@@ -24,8 +25,11 @@ export function useKeyboardNav(options: UseKeyboardNavOptions = {}): void {
   const { toggleHelp, goBack, moveSelection } = useUIStore();
 
   useInput((input, key) => {
+    debugLog(`[useKeyboardNav] Key pressed: input="${input}", ctrl=${key.ctrl}, shift=${key.shift}, enter=${key.return}, escape=${key.escape}`);
+
     // Global handlers
     if (input === '?') {
+      debugLog('[useKeyboardNav] Help key pressed');
       toggleHelp();
       return;
     }
@@ -77,12 +81,25 @@ export function useKeyboardNav(options: UseKeyboardNavOptions = {}): void {
     }
 
     // Custom handlers
+    debugLog(`[useKeyboardNav] Checking ${handlers.length} custom handlers`);
     for (const handler of handlers) {
-      const keyMatch = input === handler.key;
+      // Handle special keys that use key object properties instead of input
+      let keyMatch = false;
+      if (handler.key === 'return' || handler.key === 'enter') {
+        keyMatch = key.return;
+      } else if (handler.key === 'space') {
+        keyMatch = input === ' ';
+      } else {
+        keyMatch = input === handler.key;
+      }
+
       const ctrlMatch = handler.ctrl ? key.ctrl : !key.ctrl;
       const shiftMatch = handler.shift !== undefined ? handler.shift === key.shift : true;
 
+      debugLog(`[useKeyboardNav] Handler key="${handler.key}", keyMatch=${keyMatch}, ctrlMatch=${ctrlMatch}, shiftMatch=${shiftMatch}`);
+
       if (keyMatch && ctrlMatch && shiftMatch) {
+        debugLog(`[useKeyboardNav] Executing handler for key="${handler.key}"`);
         handler.handler();
         return;
       }

@@ -477,7 +477,8 @@ echo "$(date -u +"%Y-%m-%dT%H:%M:%SZ") - Tool: \${TOOL_NAME:-unknown}" >> "\$ACT
    */
   private async saveInstanceInfo(instanceId: string, instance: ClaudeInstance): Promise<void> {
     const instanceFile = join(this.getSubdirectory('sessions'), `instance-${instanceId}.json`);
-    await fs.writeFile(instanceFile, JSON.stringify(instance, null, 2), 'utf-8');
+    const { executor: _executor, ...persistedInstance } = instance;
+    await fs.writeFile(instanceFile, JSON.stringify(persistedInstance, null, 2), 'utf-8');
   }
 
   /**

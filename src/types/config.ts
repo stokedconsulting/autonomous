@@ -7,6 +7,7 @@ import { LLMProvider } from './assignments.js';
 export interface LLMConfig {
   enabled: boolean;
   maxConcurrentIssues: number;
+  defaultConcurrentIssues?: number; // Number to start with initially (default: 1)
   cliPath?: string;
   cliArgs?: string[];
   hooksEnabled?: boolean;
@@ -74,13 +75,26 @@ export interface PushConfig {
  * - Reading project fields (Priority, Status, Size, etc.) fresh on each query
  * - Syncing assignment status back to project
  * - Hybrid prioritization combining AI + project metadata
+ *
+ * IMPORTANT: Projects are discovered from assignments, not configured here.
+ * This config defines HOW to work with projects (field mappings), not WHICH projects.
+ * The validated array tracks which projects have already been set up to avoid re-validation.
  */
+export interface ValidatedProject {
+  projectNumber: number;
+  name: string;
+  validatedAt: string;
+  hasAutonomousView: boolean;
+}
+
 export interface ProjectConfig {
   enabled: boolean;
-  projectNumber: number; // GitHub Projects v2 number
   organizationProject: boolean; // true for org projects, false for user/repo projects
 
-  // Field mapping configuration
+  // Projects that have already been validated/set up (avoids re-validation)
+  validated?: ValidatedProject[];
+
+  // Field mapping configuration (applies to ALL discovered projects)
   fields: {
     status: {
       fieldName: string; // Usually "Status"

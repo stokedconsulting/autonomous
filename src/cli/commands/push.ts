@@ -392,7 +392,7 @@ detection and automatic theme switching.`;
 
   // Get current branch
   const branchResult = await $`git rev-parse --abbrev-ref HEAD`;
-  let branch = branchResult.stdout.trim();
+  const branch = branchResult.stdout.trim();
 
   // Check if we're in detached HEAD state
   if (branch === 'HEAD') {

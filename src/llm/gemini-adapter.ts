@@ -196,6 +196,7 @@ export class GeminiAdapter implements LLMAdapter {
 
   private async saveInstanceInfo(instanceId: string, instance: GeminiInstance): Promise<void> {
     const instanceFile = join(this.getSubdirectory('sessions'), `instance-${instanceId}.json`);
-    await fs.writeFile(instanceFile, JSON.stringify(instance, null, 2), 'utf-8');
+    const { executor: _executor, ...persistedInstance } = instance;
+    await fs.writeFile(instanceFile, JSON.stringify(persistedInstance, null, 2), 'utf-8');
   }
 }

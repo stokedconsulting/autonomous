@@ -4,7 +4,7 @@ import { promises as fs } from 'fs';
 import { join } from 'path';
 import { LLMAdapter, LLMStatus, StartLLMOptions } from './adapter.js';
 import { LLMConfig } from '../types/index.js';
-import { CLIPTYExecutor } from './cli-pty-executor.js';
+import { CodexExecExecutor } from './codex-exec-executor.js';
 import { resolveCliArgs, resolveCliPath } from './cli-defaults.js';
 import { isProcessRunning } from '../utils/process.js';
 
@@ -14,20 +14,22 @@ interface CodexInstance {
   startedAt: string;
   assignmentId: string;
   worktreePath: string;
-  executor?: CLIPTYExecutor;
+  executor?: {
+    stop(): void;
+    getPid(): number | undefined;
+    isRunning(): boolean;
+  };
 }
 
 export class CodexAdapter implements LLMAdapter {
   readonly provider = 'codex' as const;
   private config: LLMConfig;
   private autonomousDataDir: string;
-  private verbose: boolean;
   private instances = new Map<string, CodexInstance>();
 
-  constructor(config: LLMConfig, autonomousDataDir: string, verbose: boolean = false) {
+  constructor(config: LLMConfig, autonomousDataDir: string) {
     this.config = config;
     this.autonomousDataDir = autonomousDataDir;
-    this.verbose = verbose;
   }
 
   async start(options: StartLLMOptions): Promise<string> {
@@ -44,27 +46,30 @@ export class CodexAdapter implements LLMAdapter {
     const logHeader = `=== Codex Autonomous Session Starting ===\nInstance ID: ${instanceId}\nWorking Directory: ${workingDirectory}\nStarted: ${new Date().toISOString()}\n=======================================\n\n`;
     await fs.writeFile(logFile, logHeader, 'utf-8');
 
-    const executor = new CLIPTYExecutor();
-    const promptDelayMs = typeof this.config.customConfig?.promptDelayMs === 'number'
-      ? this.config.customConfig.promptDelayMs
-      : undefined;
-    const enterDelayMs = typeof this.config.customConfig?.enterDelayMs === 'number'
-      ? this.config.customConfig.enterDelayMs
-      : undefined;
-    const stripInputEcho = typeof this.config.customConfig?.stripInputEcho === 'boolean'
-      ? this.config.customConfig.stripInputEcho
-      : undefined;
+    // Use non-interactive exec mode to avoid hanging in the Codex TUI
+    const executor = new CodexExecExecutor();
+    const execArgs = [...cliArgs];
+
+    const hasDangerousBypass = execArgs.includes('--dangerously-bypass-approvals-and-sandbox');
+    if (!hasDangerousBypass) {
+      // Ensure Codex can write to the worktree and won't prompt
+      if (!execArgs.includes('--sandbox')) {
+        execArgs.push('--sandbox', 'workspace-write');
+      }
+      if (!execArgs.includes('--ask-for-approval') && !execArgs.includes('-a')) {
+        execArgs.push('--ask-for-approval', 'never');
+      }
+    }
+
+    execArgs.push('exec', '--cd', workingDirectory);
+
     const startPromise = executor.start({
       command: cliPath,
-      args: cliArgs,
+      args: execArgs,
       promptText: prompt,
       workingDirectory,
       logFile,
       instanceId,
-      onData: this.verbose ? (data: string) => process.stdout.write(data) : undefined,
-      promptDelayMs,
-      enterDelayMs,
-      stripInputEcho,
     });
 
     const pid = executor.getPid();
@@ -196,6 +201,7 @@ export class CodexAdapter implements LLMAdapter {
 
   private async saveInstanceInfo(instanceId: string, instance: CodexInstance): Promise<void> {
     const instanceFile = join(this.getSubdirectory('sessions'), `instance-${instanceId}.json`);
-    await fs.writeFile(instanceFile, JSON.stringify(instance, null, 2), 'utf-8');
+    const { executor: _executor, ...persistedInstance } = instance;
+    await fs.writeFile(instanceFile, JSON.stringify(persistedInstance, null, 2), 'utf-8');
   }
 }

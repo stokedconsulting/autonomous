@@ -19,8 +19,8 @@ export class LLMFactory {
             return new ClaudeAdapter(config, autonomousDataDir, verbose);
           case 'gemini':
             return new GeminiAdapter(config, autonomousDataDir, verbose);
-          case 'codex':
-            return new CodexAdapter(config, autonomousDataDir, verbose);
+      case 'codex':
+        return new CodexAdapter(config, autonomousDataDir);
           default:
             throw new Error(`Unknown LLM provider: ${provider}`);
         }
