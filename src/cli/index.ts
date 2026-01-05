@@ -241,6 +241,8 @@ project
   .description('List all GitHub Projects linked to this repository')
   .option('-v, --verbose', 'Show detailed information')
   .option('-a, --all', 'Show all projects including those marked as [Done]')
+  .option('--phases', 'Show phases that have no Ready sub-tasks')
+  .option('--sparse', 'Show minimal view without phase items (default shows items)')
   .action(projectListCommand);
 
 project
@@ -270,15 +272,17 @@ project
 
 project
   .command('start <project-name>')
-  .description('Start autonomous work on a project (picks first ready item, or use --item)')
+  .description('Start autonomous work on a project (default: interactive Claude with auto-continue)')
   .option('--item <number>', 'Work on a specific item number', parseInt)
   .option('--dry-run', 'Preview what would happen without starting the LLM')
-  .option('--review', 'Create project from description first, review plan, then start (use with description instead of project-name)')
-  .option('-v, --verbose', 'Verbose logging (Ink UI is now default)')
-  .option('-i, --interactive', 'Force Ink UI mode (default when terminal is interactive)')
-  .option('-p, --max-parallel <number>', 'Max parallel evaluations (default: 1)', parseInt)
+  .option('--review', 'Create project from description first, review plan, then start')
+  .option('--cu', 'Claude Unlimited mode - batch autonomous loop until PROJECT COMPLETE')
+  .option('--ua', 'Unattended Autonomous mode (DEFAULT) - interactive Claude with auto-continue')
+  .option('--basic', 'Basic Ink UI mode - single item processing with Ink interface')
+  .option('-v, --verbose', 'Verbose logging')
+  .option('-p, --max-parallel <number>', 'Max parallel evaluations for --basic mode (default: 1)', parseInt)
   .option('--provider <provider>', 'LLM provider to use (claude, gemini, codex)')
-  .option('--no-ui', 'Disable Ink UI and use legacy text output')
+  .option('--no-ui', 'Disable interactive modes and use text-only output')
   .action(projectStartCommand);
 
 project

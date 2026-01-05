@@ -10,8 +10,9 @@
 
 import React, { useState, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
-import { Spinner, TextInput } from '@inkjs/ui';
+import { Spinner } from '@inkjs/ui';
 import { Divider } from '../atoms/Divider.js';
+import { TextArea } from './TextArea.js';
 import { Header } from '../organisms/Header.js';
 import {
   generateProjectPlan,
@@ -60,6 +61,7 @@ export function ProjectCreator({
   const [error, setError] = useState<string | null>(null);
   const [progress, setProgress] = useState<string>('');
   const [issueProgress, setIssueProgress] = useState<{ current: number; total: number } | null>(null);
+  const [createdProjectNumber, setCreatedProjectNumber] = useState<number | null>(null);
   const setTextInputActive = useUIStore((s) => s.setTextInputActive);
 
   /**
@@ -76,24 +78,18 @@ export function ProjectCreator({
 
   /**
    * Keyboard handling for different stages
-   * NOTE: Skip input processing when user is typing in TextInput fields
+   * NOTE: TextArea handles its own input in description/feedback stages
    */
   useInput((input, key) => {
-    // Don't process shortcuts when user is typing in input fields
+    // TextArea handles all input in description/feedback stages (including escape)
     const isInputStage = stage === 'description' || stage === 'feedback';
-
-    // Only allow Escape key in input stages, block all other shortcuts
-    if (isInputStage && !key.escape) {
+    if (isInputStage) {
       return;
     }
 
-    // Handle Esc in various stages
+    // Handle Esc in review stage
     if (key.escape) {
-      if (stage === 'description') {
-        onCancel();
-      } else if (stage === 'feedback') {
-        setStage('review'); // Go back to review from feedback
-      } else if (stage === 'review') {
+      if (stage === 'review') {
         onCancel();
       }
     }
@@ -166,6 +162,7 @@ export function ProjectCreator({
       setProgress(`Creating GitHub Project: "${parsed.projectTitle}"...`);
       const discovery = new ProjectDiscovery(owner, repo);
       const newProject = await discovery.createProject(parsed.projectTitle);
+      setCreatedProjectNumber(newProject.number);
 
       // Link project to repository
       setProgress('Linking project to repository...');
@@ -215,16 +212,16 @@ export function ProjectCreator({
             </Text>
           </Box>
 
-          <Box marginBottom={1}>
-            <TextInput
-              placeholder="Enter project description..."
-              onSubmit={handleGeneratePlan}
-            />
-          </Box>
+          <TextArea
+            placeholder="Describe your project (multiple lines supported)..."
+            minHeight={5}
+            onSubmit={handleGeneratePlan}
+            onCancel={onCancel}
+          />
 
           <Box marginTop={1}>
             <Text dimColor>
-              Press Enter to submit │ Esc: cancel
+              Tab: submit │ Enter: new line │ Esc: cancel
             </Text>
           </Box>
         </Box>
@@ -298,16 +295,16 @@ export function ProjectCreator({
             </Text>
           </Box>
 
-          <Box marginBottom={1}>
-            <TextInput
-              placeholder="Enter your feedback..."
-              onSubmit={handleRefinePlan}
-            />
-          </Box>
+          <TextArea
+            placeholder="Enter your feedback..."
+            minHeight={3}
+            onSubmit={handleRefinePlan}
+            onCancel={() => setStage('review')}
+          />
 
           <Box marginTop={1}>
             <Text dimColor>
-              Press Enter to submit │ Esc: go back to review
+              Tab: submit │ Enter: new line │ Esc: go back to review
             </Text>
           </Box>
         </Box>
@@ -369,6 +366,13 @@ export function ProjectCreator({
             <Text color="green" bold>
               ✅ Project "{parsedPlan?.projectTitle}" created successfully!
             </Text>
+            {createdProjectNumber && (
+              <Box marginTop={1}>
+                <Text>
+                  Project Number: <Text color="cyan" bold>#{createdProjectNumber}</Text>
+                </Text>
+              </Box>
+            )}
             <Box marginTop={1}>
               <Text dimColor>
                 Created {parsedPlan?.items.length} issues across {parsedPlan ? Math.max(...parsedPlan.items.map(i => i.phaseNumber)) : 0} phases

@@ -1310,6 +1310,13 @@ export class GitHubProjectsAPI implements ProjectAPI {
    */
   private async createField(fieldDef: any): Promise<void> {
     if (fieldDef.type === 'SINGLE_SELECT') {
+      // GitHub requires at least one option for SINGLE_SELECT fields
+      // Skip creation if no options provided (e.g., Epic field that gets populated later)
+      if (!fieldDef.options || fieldDef.options.length === 0) {
+        console.log(`  ⏭ Skipping field "${fieldDef.name}" - requires at least one option (will be created when needed)`);
+        return;
+      }
+
       const optionsString = fieldDef.options
         .map((opt: any) => {
           const safeName = opt.name.replace(/"/g, '\\"');

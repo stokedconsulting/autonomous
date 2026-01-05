@@ -10,6 +10,11 @@ import { LLMConfig } from '../types/index.js';
 import { ClaudePTYExecutor } from './claude-pty-executor.js';
 import { ClaudePrintExecutor } from './claude-print-executor.js';
 import { resolveCliArgs, resolveCliPath } from './cli-defaults.js';
+import {
+  ResponseTracker,
+  ResponseWatcher,
+  generatePostPromptHook,
+} from '../utils/response-tracker.js';
 
 interface ClaudeInstance {
   instanceId: string;
@@ -19,6 +24,7 @@ interface ClaudeInstance {
   worktreePath: string;
   executor?: ClaudePTYExecutor | ClaudePrintExecutor;
   mode?: 'pty' | 'print';
+  responseWatcher?: ResponseWatcher;
 }
 
 export class ClaudeAdapter implements LLMAdapter {
@@ -28,12 +34,29 @@ export class ClaudeAdapter implements LLMAdapter {
   private autonomousDataDir: string;
   private verbose: boolean;
   private preserveLogsOnStop: boolean;
+  private responseTracker: ResponseTracker;
 
   constructor(config: LLMConfig, autonomousDataDir: string, verbose: boolean = false) {
     this.config = config;
     this.autonomousDataDir = autonomousDataDir;
     this.verbose = verbose;
     this.preserveLogsOnStop = this.config.customConfig?.preserveLogsOnStop ?? true;
+    this.responseTracker = new ResponseTracker(autonomousDataDir);
+  }
+
+  /**
+   * Get the response tracker for external access
+   */
+  getResponseTracker(): ResponseTracker {
+    return this.responseTracker;
+  }
+
+  /**
+   * Get a response watcher for a specific instance
+   */
+  getResponseWatcher(instanceId: string): ResponseWatcher | undefined {
+    const instance = this.instances.get(instanceId);
+    return instance?.responseWatcher;
   }
 
   /**
@@ -50,9 +73,12 @@ export class ClaudeAdapter implements LLMAdapter {
     const { assignment, prompt, workingDirectory } = options;
     const instanceId = assignment.llmInstanceId;
 
+    // Initialize response tracking
+    await this.responseTracker.initSession(instanceId, assignment.id, workingDirectory);
+
     // Install hooks if enabled
     if (this.config.hooksEnabled) {
-      await this.installHooks(workingDirectory, assignment.id);
+      await this.installHooks(workingDirectory, assignment.id, instanceId);
       await this.installSessionEndHook(workingDirectory);
     }
 
@@ -130,6 +156,10 @@ export class ClaudeAdapter implements LLMAdapter {
       });
     }
 
+    // Create and start response watcher
+    const responseWatcher = new ResponseWatcher(this.responseTracker, instanceId);
+    await responseWatcher.start();
+
     const instance: ClaudeInstance = {
       instanceId,
       processId: pid || 0,
@@ -138,6 +168,7 @@ export class ClaudeAdapter implements LLMAdapter {
       worktreePath: workingDirectory,
       executor,
       mode,
+      responseWatcher,
     };
 
     this.instances.set(instanceId, instance);
@@ -155,6 +186,11 @@ export class ClaudeAdapter implements LLMAdapter {
     const instance = this.instances.get(instanceId);
     if (!instance) {
       throw new Error(`Instance ${instanceId} not found`);
+    }
+
+    // Stop response watcher if present
+    if (instance.responseWatcher) {
+      instance.responseWatcher.stop();
     }
 
     // Stop executor if present
@@ -201,7 +237,26 @@ export class ClaudeAdapter implements LLMAdapter {
 
     let lastActivity: string | undefined;
 
-    // Check for Stop signal - Claude finished responding and waiting for input
+    // PRIMARY: Check response tracker for new responses (deterministic)
+    const latestResponse = await this.responseTracker.getLatestResponse(instanceId);
+    if (latestResponse) {
+      lastActivity = latestResponse.timestamp;
+
+      // If we have a response, Claude has finished that response cycle
+      // Check if it's a completion signal
+      if (latestResponse.hasCompletionSignal || latestResponse.isBlocked || latestResponse.isFailed) {
+        return {
+          instanceId,
+          provider: 'claude',
+          isRunning: false,
+          startedAt: instance.startedAt,
+          lastActivity,
+          processId: instance.processId,
+        };
+      }
+    }
+
+    // SECONDARY: Check for Stop signal - Claude finished responding and waiting for input
     const stopSignalFile = join(this.autonomousDataDir, `stop-signal-${instanceId}.json`);
     let hasStopSignal = false;
 
@@ -280,7 +335,7 @@ export class ClaudeAdapter implements LLMAdapter {
    * Install hooks for Claude
    * Uses Claude Code's hook system via settings.json
    */
-  async installHooks(worktreePath: string, assignmentId: string): Promise<void> {
+  async installHooks(worktreePath: string, assignmentId: string, sessionId: string): Promise<void> {
     const claudeDir = join(worktreePath, '.claude');
     const hooksDir = join(claudeDir, 'hooks');
 
@@ -292,6 +347,13 @@ export class ClaudeAdapter implements LLMAdapter {
     const stopHookPath = join(hooksDir, 'autonomous-stop.sh');
     await fs.writeFile(stopHookPath, stopHook, 'utf-8');
     await fs.chmod(stopHookPath, 0o755);
+
+    // Create POST-PROMPT hook - captures response and writes to session JSON
+    // This is the PRIMARY completion detection mechanism
+    const postPromptHook = generatePostPromptHook(this.autonomousDataDir, sessionId, assignmentId);
+    const postPromptHookPath = join(hooksDir, 'autonomous-post-prompt.sh');
+    await fs.writeFile(postPromptHookPath, postPromptHook, 'utf-8');
+    await fs.chmod(postPromptHookPath, 0o755);
 
     // Create tool-use hook script to track activity
     const toolUseHook = this.generateToolUseHook(assignmentId);
@@ -320,6 +382,10 @@ export class ClaudeAdapter implements LLMAdapter {
             {
               type: 'command',
               command: stopHookPath,
+            },
+            {
+              type: 'command',
+              command: postPromptHookPath,
             },
           ],
         },

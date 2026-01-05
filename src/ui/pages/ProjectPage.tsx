@@ -39,6 +39,7 @@ interface ProjectHierarchy {
   phases: PhaseGroup[];
   totalItems: number;
   completedItems: number;
+  inProgressItems: number;
   loading?: boolean;
 }
 
@@ -60,6 +61,9 @@ export function ProjectPage(): React.ReactElement {
   const [config, setConfig] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [showCompletedProjects, setShowCompletedProjects] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState<GitHubProject | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0); // Trigger to reload projects
 
   const setTextInputActive = useUIStore((s) => s.setTextInputActive);
   const selectedIndex = useUIStore((s) => s.selectedIndex);
@@ -90,12 +94,16 @@ export function ProjectPage(): React.ReactElement {
 
   // Load projects list from GitHub (lightweight)
   useEffect(() => {
-    async function loadProjects() {
-      if (!config) {
-        debugLog('[ProjectPage] No config, skipping project load');
-        return;
-      }
+    // Early exit if no config - don't change loading state
+    if (!config) {
+      debugLog('[ProjectPage] No config, skipping project load');
+      return;
+    }
 
+    // Track if effect is still active (not cleaned up)
+    let isCancelled = false;
+
+    async function loadProjects() {
       debugLog('[ProjectPage] Loading projects...');
       setLoading(true);
       setError(null);
@@ -105,6 +113,12 @@ export function ProjectPage(): React.ReactElement {
         const discoveredProjects = await discovery.getLinkedProjects();
         debugLog(`[ProjectPage] Discovered ${discoveredProjects.length} projects`);
 
+        // Only update state if effect is still active
+        if (isCancelled) {
+          debugLog('[ProjectPage] Effect cancelled, skipping state update');
+          return;
+        }
+
         // Map to GitHubProject (add items array)
         const projectsWithItems: GitHubProject[] = discoveredProjects.map(p => ({
           ...p,
@@ -112,17 +126,29 @@ export function ProjectPage(): React.ReactElement {
         }));
 
         setProjects(projectsWithItems);
-        setLoading(false);
         debugLog('[ProjectPage] Projects loaded successfully');
       } catch (err) {
         debugLog(`[ProjectPage] Error loading projects: ${err instanceof Error ? err.message : String(err)}`);
-        setError(err instanceof Error ? err.message : 'Failed to load projects');
-        setLoading(false);
+        if (!isCancelled) {
+          setError(err instanceof Error ? err.message : 'Failed to load projects');
+        }
+      } finally {
+        // Always set loading to false when done, unless cancelled
+        if (!isCancelled) {
+          setLoading(false);
+          debugLog('[ProjectPage] Loading state set to false');
+        }
       }
     }
 
     loadProjects();
-  }, [config]);
+
+    // Cleanup function to prevent state updates after unmount/re-run
+    return () => {
+      isCancelled = true;
+      debugLog('[ProjectPage] Effect cleanup - cancelled');
+    };
+  }, [config, refreshKey]);
 
   // Load project items when expanded
   useEffect(() => {
@@ -149,6 +175,7 @@ export function ProjectPage(): React.ReactElement {
         phases: [],
         totalItems: 0,
         completedItems: 0,
+        inProgressItems: 0,
         loading: true,
       }));
 
@@ -176,9 +203,14 @@ export function ProjectPage(): React.ReactElement {
         // Calculate completion stats
         const totalItems = items.length;
         const completedStatuses = ['Done', 'Dev Complete', 'Completed', 'Merged'];
+        const inProgressStatuses = ['In Progress', 'In Review'];
         const completedItems = items.filter(item => {
           const status = item.fieldValues['Status'];
           return status && completedStatuses.includes(status);
+        }).length;
+        const inProgressItems = items.filter(item => {
+          const status = item.fieldValues['Status'];
+          return status && inProgressStatuses.includes(status);
         }).length;
 
         setProjectHierarchies(prev => new Map(prev).set(projectNumber, {
@@ -186,6 +218,7 @@ export function ProjectPage(): React.ReactElement {
           phases,
           totalItems,
           completedItems,
+          inProgressItems,
           loading: false,
         }));
       } catch (err) {
@@ -197,6 +230,7 @@ export function ProjectPage(): React.ReactElement {
           phases: [],
           totalItems: 0,
           completedItems: 0,
+          inProgressItems: 0,
           loading: false,
         }));
       }
@@ -284,8 +318,67 @@ export function ProjectPage(): React.ReactElement {
       {
         key: 'c',
         handler: () => {
-          if (!createMode && !reviewedMode) {
+          if (!createMode && !reviewedMode && !deleteConfirm) {
             setShowCompletedProjects(prev => !prev);
+          }
+        },
+      },
+      {
+        key: 'D', // Shift+d for delete
+        handler: () => {
+          if (createMode || reviewedMode || deleteConfirm || deleting) return;
+
+          const item = flatItems[selectedIndex];
+          if (!item || item.type !== 'project') {
+            notify('Select a project to delete', 'info');
+            return;
+          }
+
+          const project = projects.find(p => p.number === item.projectNumber);
+          if (project) {
+            setDeleteConfirm(project);
+          }
+        },
+      },
+      {
+        key: 'y', // Confirm delete
+        handler: async () => {
+          if (!deleteConfirm || deleting) return;
+
+          setDeleting(true);
+          try {
+            const discovery = new ProjectDiscovery(config.github.owner, config.github.repo);
+            await discovery.deleteProject(deleteConfirm.id);
+            notify(`✓ Deleted project: ${deleteConfirm.title}`, 'success');
+
+            // Remove from local state
+            setProjects(prev => prev.filter(p => p.id !== deleteConfirm.id));
+            setProjectHierarchies(prev => {
+              const next = new Map(prev);
+              next.delete(deleteConfirm.number);
+              return next;
+            });
+          } catch (err) {
+            notify(`Failed to delete: ${err instanceof Error ? err.message : 'Unknown error'}`, 'error');
+          } finally {
+            setDeleting(false);
+            setDeleteConfirm(null);
+          }
+        },
+      },
+      {
+        key: 'n', // Cancel delete
+        handler: () => {
+          if (deleteConfirm) {
+            setDeleteConfirm(null);
+          }
+        },
+      },
+      {
+        key: 'escape',
+        handler: () => {
+          if (deleteConfirm) {
+            setDeleteConfirm(null);
           }
         },
       },
@@ -500,8 +593,8 @@ export function ProjectPage(): React.ReactElement {
 
   const handleCreateComplete = () => {
     setCreateMode(false);
-    setLoading(true);
-    // Reload will happen via useEffect
+    setProjectHierarchies(new Map()); // Clear cached hierarchies
+    setRefreshKey(prev => prev + 1); // Trigger project reload
   };
 
   const handleCreateCancel = () => {
@@ -538,8 +631,8 @@ export function ProjectPage(): React.ReactElement {
       () => {} // No progress callback for now
     );
 
-    setLoading(true);
-    // Reload will happen via useEffect
+    setProjectHierarchies(new Map()); // Clear cached hierarchies
+    setRefreshKey(prev => prev + 1); // Trigger project reload
   };
 
   const handleReviewedCancel = () => {
@@ -652,14 +745,26 @@ export function ProjectPage(): React.ReactElement {
               const isProjectSelected = selectedIndex === projectIndex;
 
               // Check if project is 100% complete
-              const isComplete = hierarchy && 
-                                hierarchy.totalItems > 0 && 
+              const isComplete = hierarchy &&
+                                hierarchy.totalItems > 0 &&
                                 hierarchy.completedItems === hierarchy.totalItems;
 
-              // Auto-prefix completed projects with "[Done] - "
-              const displayTitle = isComplete && !project.title.startsWith('[Done]') 
-                ? `[Done] - ${project.title}`
-                : project.title;
+              // Check if project has items in progress
+              const hasInProgress = hierarchy &&
+                                   hierarchy.inProgressItems &&
+                                   hierarchy.inProgressItems > 0;
+
+              // Auto-prefix projects based on status
+              let displayTitle = project.title;
+              if (isComplete && !project.title.startsWith('[Done]')) {
+                // Remove [In Progress] if present and add [Done]
+                const baseTitle = project.title.replace('[In Progress] - ', '');
+                displayTitle = `[Done] - ${baseTitle}`;
+              } else if (hasInProgress && !isComplete &&
+                        !project.title.startsWith('[Done]') &&
+                        !project.title.startsWith('[In Progress]')) {
+                displayTitle = `[In Progress] - ${project.title}`;
+              }
 
               return (
                 <Box key={project.id} flexDirection="column" marginBottom={1}>
@@ -747,9 +852,40 @@ export function ProjectPage(): React.ReactElement {
           </Box>
         )}
 
+        {/* Delete Confirmation Dialog */}
+        {deleteConfirm && (
+          <Box
+            flexDirection="column"
+            borderStyle="round"
+            borderColor="red"
+            paddingX={2}
+            paddingY={1}
+            marginY={1}
+          >
+            <Text color="red" bold>⚠️  Delete Project?</Text>
+            <Text>
+              Are you sure you want to delete{' '}
+              <Text color="cyan" bold>#{deleteConfirm.number}</Text>{' '}
+              <Text bold>{deleteConfirm.title}</Text>?
+            </Text>
+            <Text dimColor>This action cannot be undone.</Text>
+            <Box marginTop={1}>
+              {deleting ? (
+                <Box>
+                  <Spinner label="Deleting..." />
+                </Box>
+              ) : (
+                <Text>
+                  Press <Text color="green" bold>y</Text> to confirm, <Text color="yellow" bold>n</Text> or <Text color="yellow" bold>Esc</Text> to cancel
+                </Text>
+              )}
+            </Box>
+          </Box>
+        )}
+
         <Box marginTop={1} flexDirection="column">
           <Text dimColor>
-            n: new project │ r: reviewed project │ c: toggle completed ({showCompletedProjects ? 'shown' : 'hidden'}) │ j/k: navigate ({selectedIndex + 1}/{flatItems.length}) │ Enter: open │ A: assign │ q: back │ ?: help
+            n: new project │ r: reviewed project │ c: toggle completed ({showCompletedProjects ? 'shown' : 'hidden'}) │ j/k: navigate ({selectedIndex + 1}/{flatItems.length}) │ Enter: open │ A: assign │ D: delete │ q: back │ ?: help
           </Text>
           {flatItems.length > 0 && flatItems[selectedIndex] && (
             <Text dimColor>

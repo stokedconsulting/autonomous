@@ -24,6 +24,6 @@ export interface LLMAdapter {
   isInstalled(): Promise<boolean>;
   getVersion(): Promise<string | null>;
   supportsHooks(): boolean;
-  installHooks(worktreePath: string, assignmentId: string): Promise<void>;
+  installHooks(worktreePath: string, assignmentId: string, sessionId?: string): Promise<void>;
   getLastSummary(instanceId: string): Promise<string | null>;
 }

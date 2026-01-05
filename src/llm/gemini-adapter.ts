@@ -182,7 +182,7 @@ export class GeminiAdapter implements LLMAdapter {
     return false;
   }
 
-  async installHooks(_worktreePath: string, _assignmentId: string): Promise<void> {
+  async installHooks(_worktreePath: string, _assignmentId: string, _sessionId?: string): Promise<void> {
     // No-op
   }
 

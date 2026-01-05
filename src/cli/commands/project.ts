@@ -24,6 +24,7 @@ import { join } from 'path';
 import { promises as fs } from 'fs';
 import { basename } from 'path';
 import { detectSessionCompletion, extractPRNumber, detectAutonomousSignals } from '../../utils/session-analyzer.js';
+import { ResponseTracker, ResponseWatcher } from '../../utils/response-tracker.js';
 import { getLatestFailedReviewFeedback } from '../../utils/review-feedback.js';
 import {
   generateProjectPlan,
@@ -32,6 +33,7 @@ import {
   createProjectIssues
 } from '../../services/project-creation.js';
 import { renderProjectCreation } from '../../ui/apps/index.js';
+import { groupItemsByPhase } from '../../utils/phase-dependencies.js';
 
 function hasStderr(error: unknown): error is { stderr: string } {
   return typeof error === 'object' && error !== null && 'stderr' in error;
@@ -41,6 +43,8 @@ interface ProjectCommandOptions {
   verbose?: boolean;
   limit?: number;
   all?: boolean;
+  phases?: boolean;  // Show phases with no Ready sub-tasks
+  sparse?: boolean;  // Show minimal view without phase items
 }
 
 export async function projectInitCommand(_options: ProjectCommandOptions): Promise<void> {
@@ -613,8 +617,8 @@ export async function projectListCommand(options: ProjectCommandOptions): Promis
     }
 
     // Filter out [Done] projects unless --all flag is provided
-    const filteredProjects = options.all 
-      ? projects 
+    const filteredProjects = options.all
+      ? projects
       : projects.filter(p => !p.title.includes('[Done]'));
 
     // Show validated projects (multi-project support)
@@ -628,14 +632,251 @@ export async function projectListCommand(options: ProjectCommandOptions): Promis
 
     console.log(chalk.gray(`Found ${displayCount} project(s)${hiddenCount > 0 ? ` (${hiddenCount} done projects hidden, use --all to show)` : ''}:\n`));
 
+    // Show phase details by default unless --sparse is set
+    const showPhaseDetails = !options.sparse;
+
+    // Define what statuses are considered "Ready" (work that can be started)
+    const readyStatuses = new Set(['Ready', 'Todo', 'Evaluated', 'Failed Review']);
+    // Define what statuses are considered "complete" (work finished)
+    const doneStatuses = new Set(['Done', 'Merged', 'Closed']);
+    // Define what statuses are considered "in progress" (actively being worked on)
+    const inProgressStatuses = new Set(['In Progress', 'In Review']);
+
+    // Track projects that were auto-updated to done (for accurate count)
+    let autoUpdatedToDone = 0;
+    let autoUpdatedToInProgress = 0;
+
     for (const project of filteredProjects) {
       const isValidated = validatedProjectNumbers.has(project.number);
       const prefix = isValidated ? chalk.green('✓ ') : '  ';
       const suffix = isValidated ? chalk.gray(' (validated)') : '';
 
+      // Fetch items and check for auto-updates BEFORE displaying
+      let shouldSkipDisplay = false;
+      let projectsAPI: GitHubProjectsAPI | null = null;
+      let sortedPhases: ReturnType<typeof groupItemsByPhase> extends Map<any, infer V> ? V[] : never[] = [];
+      let statusFieldName = 'Status';
+
+      if (showPhaseDetails && config.project) {
+        try {
+          projectsAPI = new GitHubProjectsAPI(project.id, config.project as ProjectConfig);
+          const token = await getGitHubToken();
+          const githubAPI = new GitHubAPI(token, config.github.owner, config.github.repo);
+          const items = await projectsAPI.getAllItems();
+          const phases = groupItemsByPhase(items);
+          statusFieldName = config.project.fields?.status?.fieldName || 'Status';
+
+          // Track issues closed during this processing
+          let issuesClosedCount = 0;
+
+          // Sort phases by phase number
+          sortedPhases = Array.from(phases.values())
+            .sort((a, b) => a.phaseNumber - b.phaseNumber);
+
+          // AUTO-UPDATE: Check and update phase masters when all sub-items are Done
+          let allProjectItemsDone = items.length > 0;
+          for (const phase of sortedPhases) {
+            // Check if all work items in this phase are Done
+            const allWorkItemsDone = phase.workItems.length > 0 &&
+              phase.workItems.every(item => doneStatuses.has(item.fieldValues[statusFieldName]));
+
+            // If all work items are Done but master is not Done, update it
+            if (allWorkItemsDone && phase.masterItem) {
+              const masterStatus = phase.masterItem.fieldValues[statusFieldName];
+              if (!doneStatuses.has(masterStatus)) {
+                try {
+                  await projectsAPI.updateItemStatusByValue(phase.masterItem.id, 'Done');
+                  if (options.verbose) {
+                    console.log(chalk.green(`  ✓ Auto-updated ${phase.phaseName} master to Done (project #${project.number})`));
+                  }
+                  // Update local state for display
+                  phase.masterItem.fieldValues[statusFieldName] = 'Done';
+                } catch (updateErr) {
+                  if (options.verbose) {
+                    console.log(chalk.yellow(`  ⚠ Could not auto-update ${phase.phaseName} master: ${updateErr instanceof Error ? updateErr.message : 'Unknown error'}`));
+                  }
+                }
+              }
+            }
+
+            // Track if all items in project are done (work items + masters)
+            const phaseComplete = allWorkItemsDone &&
+              (!phase.masterItem || doneStatuses.has(phase.masterItem.fieldValues[statusFieldName]));
+            if (!phaseComplete) {
+              allProjectItemsDone = false;
+            }
+          }
+
+          // Also check items not in phases
+          const itemsInPhases = new Set(
+            sortedPhases.flatMap(p => [...p.workItems.map(i => i.id), p.masterItem?.id].filter(Boolean))
+          );
+          const orphanItems = items.filter(i => !itemsInPhases.has(i.id));
+          if (orphanItems.some(i => !doneStatuses.has(i.fieldValues[statusFieldName]))) {
+            allProjectItemsDone = false;
+          }
+
+          // Check if any items are in progress
+          const hasItemsInProgress = items.some(item =>
+            inProgressStatuses.has(item.fieldValues[statusFieldName])
+          );
+
+          // AUTO-UPDATE: Add [Done] prefix to project title if all items are Done
+          if (allProjectItemsDone && items.length > 0 && !project.title.startsWith('[Done]')) {
+            try {
+              // Remove [In Progress] prefix if present before adding [Done]
+              let baseTitle = project.title;
+              if (baseTitle.startsWith('[In Progress] - ')) {
+                baseTitle = baseTitle.replace('[In Progress] - ', '');
+              }
+              const newTitle = `[Done] - ${baseTitle}`;
+              await discovery.updateProjectTitle(project.id, newTitle);
+              if (options.verbose) {
+                console.log(chalk.green(`  ✓ Project #${project.number} marked as [Done] - all items complete`));
+              }
+              project.title = newTitle; // Update local reference
+              autoUpdatedToDone++;
+
+              // Skip displaying this project if --all is not set (it's now done)
+              if (!options.all) {
+                shouldSkipDisplay = true;
+              }
+            } catch (updateErr) {
+              if (options.verbose) {
+                console.log(chalk.yellow(`  ⚠ Could not mark project #${project.number} as Done: ${updateErr instanceof Error ? updateErr.message : 'Unknown error'}`));
+              }
+            }
+          }
+
+          // AUTO-UPDATE: Add [In Progress] prefix if any items are actively being worked on
+          // Only if not already done and not already marked
+          if (!allProjectItemsDone && hasItemsInProgress &&
+              !project.title.startsWith('[Done]') &&
+              !project.title.startsWith('[In Progress]')) {
+            try {
+              const newTitle = `[In Progress] - ${project.title}`;
+              await discovery.updateProjectTitle(project.id, newTitle);
+              if (options.verbose) {
+                console.log(chalk.blue(`  ✓ Project #${project.number} marked as [In Progress] - work in progress`));
+              }
+              project.title = newTitle; // Update local reference
+              autoUpdatedToInProgress++;
+            } catch (updateErr) {
+              if (options.verbose) {
+                console.log(chalk.yellow(`  ⚠ Could not mark project #${project.number} as In Progress: ${updateErr instanceof Error ? updateErr.message : 'Unknown error'}`));
+              }
+            }
+          }
+
+          // AUTO-CLOSE: Close GitHub issues for items that are Done but still open
+          for (const item of items) {
+            const itemStatus = item.fieldValues[statusFieldName];
+            const issueState = item.content.state;
+
+            // If item is Done but issue is still open, close the issue
+            if (doneStatuses.has(itemStatus) && issueState === 'open') {
+              try {
+                await githubAPI.closeIssue(item.content.number);
+                issuesClosedCount++;
+                if (options.verbose) {
+                  console.log(chalk.green(`  ✓ Auto-closed issue #${item.content.number} (marked as ${itemStatus})`));
+                }
+              } catch (closeErr) {
+                if (options.verbose) {
+                  console.log(chalk.yellow(`  ⚠ Could not close issue #${item.content.number}: ${closeErr instanceof Error ? closeErr.message : 'Unknown error'}`));
+                }
+              }
+            }
+          }
+
+          // Report issues closed (only if any were closed and not in verbose mode)
+          if (issuesClosedCount > 0 && !options.verbose) {
+            console.log(chalk.green(`  ✓ Auto-closed ${issuesClosedCount} issue(s) for project #${project.number}`));
+          }
+        } catch (err) {
+          // Will show error when displaying
+        }
+      }
+
+      // Skip display for newly-done projects (unless --all)
+      if (shouldSkipDisplay) {
+        continue;
+      }
+
+      // Now display the project
       console.log(`${prefix}${chalk.cyan(`#${project.number}`)} ${chalk.white(project.title)}${suffix}`);
       console.log(chalk.gray(`     ${project.url}`));
+
+      // Show phase/item details
+      if (showPhaseDetails && config.project && projectsAPI) {
+        try {
+          if (sortedPhases.length === 0) {
+            console.log(chalk.gray('     No phases found'));
+          } else {
+            for (const phase of sortedPhases) {
+              // For --phases: Show phases that have no Ready sub-tasks (work items with Ready status)
+              if (options.phases) {
+                const workItemsWithReady = phase.workItems.filter(item => {
+                  const status = item.fieldValues[statusFieldName];
+                  return readyStatuses.has(status);
+                });
+
+                // Only show phases with NO ready work items (meaning phase needs attention)
+                if (workItemsWithReady.length === 0 && phase.workItems.length > 0) {
+                  const masterStatus = phase.masterItem ?
+                    phase.masterItem.fieldValues[statusFieldName] : 'No Master';
+                  const completedCount = phase.workItems.filter(item => {
+                    const status = item.fieldValues[statusFieldName];
+                    return doneStatuses.has(status);
+                  }).length;
+
+                  console.log(chalk.yellow(`     📋 ${phase.phaseName}`));
+                  console.log(chalk.gray(`        Master: ${masterStatus} | Items: ${completedCount}/${phase.workItems.length} done, 0 ready`));
+                }
+              } else {
+                // Default: Show phases with their incomplete items indented
+                const incompleteItems = phase.workItems.filter(item => {
+                  const status = item.fieldValues[statusFieldName];
+                  return !doneStatuses.has(status);
+                });
+
+                // Show phase header
+                const masterStatus = phase.masterItem ?
+                  phase.masterItem.fieldValues[statusFieldName] : null;
+                const completedCount = phase.workItems.length - incompleteItems.length;
+
+                console.log(chalk.cyan(`     📋 ${phase.phaseName}`) +
+                  chalk.gray(` (${completedCount}/${phase.workItems.length} done)`) +
+                  (masterStatus ? chalk.gray(` [Master: ${masterStatus}]`) : ''));
+
+                // Show incomplete items indented
+                for (const item of incompleteItems) {
+                  const status = item.fieldValues[statusFieldName] || 'No Status';
+                  const statusColor = readyStatuses.has(status) ? chalk.green : chalk.yellow;
+                  console.log(chalk.gray(`        `) +
+                    chalk.white(`#${item.content.number}`) +
+                    chalk.gray(`: ${item.content.title.substring(0, 50)}${item.content.title.length > 50 ? '...' : ''}`) +
+                    ` [${statusColor(status)}]`);
+                }
+              }
+            }
+          }
+        } catch (err) {
+          console.log(chalk.gray(`     ${chalk.yellow('⚠')} Could not fetch items: ${err instanceof Error ? err.message : 'Unknown error'}`));
+        }
+      }
+
       console.log('');
+    }
+
+    // Update the hidden count if we auto-updated any projects
+    if (autoUpdatedToDone > 0 && !options.all) {
+      console.log(chalk.gray(`(${autoUpdatedToDone} project(s) were auto-marked as [Done] and hidden)\n`));
+    }
+
+    // Show in-progress updates
+    if (autoUpdatedToInProgress > 0) {
+      console.log(chalk.blue(`(${autoUpdatedToInProgress} project(s) were marked as [In Progress])\n`));
     }
 
     if (validatedProjectNumbers.size > 0) {
@@ -654,10 +895,13 @@ interface ProjectStartOptions extends ProjectCommandOptions {
   item?: number;
   dryRun?: boolean;
   review?: boolean;
-  interactive?: boolean;  // Force Ink UI (default)
+  interactive?: boolean;  // Force Ink UI
   maxParallel?: number;   // Max parallel evaluations (default: 1)
   provider?: string;
   ui?: boolean;           // Disable UI when false (--no-ui)
+  cu?: boolean;           // Claude Unlimited mode - autonomous loop until PROJECT COMPLETE
+  ua?: boolean;           // Unattended Autonomous - interactive but auto-continues (DEFAULT)
+  basic?: boolean;        // Basic Ink UI mode (old default)
 }
 
 // Track running project processes (in-memory for single process enforcement)
@@ -677,30 +921,50 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
     return;
   }
 
-  const hasTTY = Boolean(process.stdout.isTTY && process.stdin.isTTY);
-  const shouldUseInkUI = options.ui !== false && hasTTY;
-
-  // Use interactive Ink UI by default (unless --no-ui or no TTY)
-  if (shouldUseInkUI || options.interactive || options.verbose) {
-    try {
-      const { renderProjectStart } = await import('../../ui/apps/index.js');
-
-      await renderProjectStart({
-        projectIdentifier,
-        verbose: options.verbose,
-        maxParallel: options.maxParallel ?? 1,
-        dryRun: options.dryRun,
-        provider: options.provider,
-      });
-      return;
-    } catch (error) {
-      console.error(chalk.red('\n✗ Error starting interactive UI:'), error instanceof Error ? error.message : String(error));
-      console.log(chalk.yellow('Falling back to non-interactive mode...\n'));
-      // Fall through to non-interactive mode
-    }
-  } else if (!hasTTY && options.ui !== false) {
-    console.log(chalk.yellow('⚠️  TTY not detected; run with --no-ui to skip this warning.'));
+  // Handle --cu mode: Claude Unlimited autonomous loop
+  if (options.cu) {
+    await projectStartWithClaudeUnlimited(projectIdentifier, options);
+    return;
   }
+
+  // Handle --basic mode: Use Ink UI (old default behavior)
+  if (options.basic) {
+    const hasTTY = Boolean(process.stdout.isTTY && process.stdin.isTTY);
+    const shouldUseInkUI = options.ui !== false && hasTTY;
+
+    if (shouldUseInkUI || options.interactive || options.verbose) {
+      try {
+        const { renderProjectStart } = await import('../../ui/apps/index.js');
+
+        await renderProjectStart({
+          projectIdentifier,
+          verbose: options.verbose,
+          maxParallel: options.maxParallel ?? 1,
+          dryRun: options.dryRun,
+          provider: options.provider,
+        });
+        return;
+      } catch (error) {
+        console.error(chalk.red('\n✗ Error starting interactive UI:'), error instanceof Error ? error.message : String(error));
+        console.log(chalk.yellow('Falling back to non-interactive mode...\n'));
+      }
+    }
+  }
+
+  // DEFAULT: --ua mode (Unattended Autonomous - interactive Claude with auto-continue)
+  // Also triggered explicitly with --ua flag
+  const hasTTY = Boolean(process.stdout.isTTY && process.stdin.isTTY);
+  if (hasTTY && options.ui !== false) {
+    await projectStartWithUnattendedAutonomous(projectIdentifier, options);
+    return;
+  }
+
+  // Non-TTY warning
+  if (!hasTTY) {
+    console.log(chalk.yellow('⚠️  TTY not detected; using text-only mode.'));
+  }
+
+  // Fallback to text-based mode for non-TTY environments
 
   console.log(chalk.blue.bold('\n🚀 Starting Autonomous Project Work\n'));
 
@@ -1447,6 +1711,502 @@ interface ProjectCreateOptions extends ProjectCommandOptions {
   review?: boolean;
   reviewed?: boolean;
   start?: boolean;
+}
+
+/**
+ * Start a project with Claude Unlimited - autonomous loop until PROJECT COMPLETE
+ *
+ * This mode:
+ * 1. Runs `cldp project <projectNumber>` to start Claude working on the project
+ * 2. When Claude finishes responding, checks if output contains "PROJECT COMPLETE"
+ * 3. If not complete, sends "continue working on this project" to the same session
+ * 4. Repeats until project is marked complete
+ */
+async function projectStartWithClaudeUnlimited(
+  projectIdentifier: string,
+  _options: ProjectStartOptions
+): Promise<void> {
+  const { spawn } = await import('child_process');
+  const { randomUUID } = await import('crypto');
+  const path = await import('path');
+  const fs = await import('fs/promises');
+  const os = await import('os');
+
+  console.log(chalk.blue.bold('\n🔄 Starting Claude Unlimited Mode\n'));
+  console.log(chalk.gray('This mode will autonomously continue working until PROJECT COMPLETE is detected.\n'));
+
+  // Parse project number
+  const projectNumber = parseInt(projectIdentifier);
+  if (isNaN(projectNumber)) {
+    console.error(chalk.red('Error: --cu mode requires a numeric project number.'));
+    console.error(chalk.gray('Usage: auto project start --cu <project-number>'));
+    process.exit(1);
+  }
+
+  // Generate a unique session ID for this autonomous run
+  const sessionId = randomUUID();
+  console.log(chalk.gray(`Session ID: ${sessionId}`));
+
+  // Read the project prompt template
+  const promptFile = path.join(os.homedir(), '.claude-prompt', 'project.prompt');
+  let basePrompt: string;
+  try {
+    basePrompt = await fs.readFile(promptFile, 'utf-8');
+  } catch (err) {
+    console.error(chalk.red(`Error: Prompt file not found: ${promptFile}`));
+    console.error(chalk.gray('Please create the prompt file with your project instructions.'));
+    process.exit(1);
+  }
+
+  // Build the system prompt
+  const systemPrompt = `IMPORTANT — PROJECT SELECTION IS NOT AMBIGUOUS.
+
+You MUST operate ONLY on the GitHub Project with the following explicit number:
+
+PROJECT NUMBER: ${projectNumber}
+
+Do not attempt to infer or detect other project numbers. All work MUST be done inside this specific project.
+
+---------------------------------------------------------------------
+
+${basePrompt}
+
+---------------------------------------------------------------------
+
+AUTONOMOUS MODE INSTRUCTIONS:
+When you have completed ALL work items in the project and there is nothing left to do,
+you MUST end your response with the exact phrase: PROJECT COMPLETE
+
+If there is still work remaining, do NOT include "PROJECT COMPLETE" in your response.`;
+
+  const COMPLETION_MARKER = 'PROJECT COMPLETE';
+  const MAX_ITERATIONS = 100; // Safety limit
+  let iteration = 0;
+  let isComplete = false;
+
+  /**
+   * Run Claude with the given prompt and return the output
+   */
+  async function runClaude(prompt: string, isResume: boolean): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const args: string[] = [
+        '--print',
+        '--dangerously-skip-permissions',
+      ];
+
+      if (isResume) {
+        args.push('--resume', sessionId);
+      } else {
+        args.push('--session-id', sessionId);
+        args.push('--append-system-prompt', systemPrompt);
+      }
+
+      args.push(prompt);
+
+      console.log(chalk.cyan(`\n${'─'.repeat(60)}`));
+      console.log(chalk.cyan.bold(`Iteration ${iteration + 1}${isResume ? ' (continuing)' : ' (starting)'}`));
+      console.log(chalk.cyan(`${'─'.repeat(60)}\n`));
+
+      const child = spawn('claude', args, {
+        cwd: process.cwd(),
+        env: process.env,
+        stdio: ['inherit', 'pipe', 'pipe'],
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout?.on('data', (data: Buffer) => {
+        const text = data.toString();
+        stdout += text;
+        process.stdout.write(text); // Stream output to terminal
+      });
+
+      child.stderr?.on('data', (data: Buffer) => {
+        const text = data.toString();
+        stderr += text;
+        process.stderr.write(text);
+      });
+
+      child.on('close', (code: number | null) => {
+        if (code === 0) {
+          resolve(stdout);
+        } else {
+          reject(new Error(`Claude exited with code ${code}: ${stderr}`));
+        }
+      });
+
+      child.on('error', (err: Error) => {
+        reject(err);
+      });
+    });
+  }
+
+  try {
+    // Initial prompt
+    const initialPrompt = `Begin working on GitHub Project #${projectNumber}. Start by identifying the active Phase and its work items. Work through each item systematically.`;
+
+    while (!isComplete && iteration < MAX_ITERATIONS) {
+      const prompt = iteration === 0
+        ? initialPrompt
+        : `Continue working on this project. Pick up where you left off and complete the next task.
+
+REMINDER: When ALL project work is finished, you MUST end your response with exactly:
+PROJECT COMPLETE
+
+This marker is required for automation to detect completion. Do not forget it.`;
+
+      const output = await runClaude(prompt, iteration > 0);
+      iteration++;
+
+      // Check for completion marker
+      if (output.includes(COMPLETION_MARKER)) {
+        isComplete = true;
+        console.log(chalk.green.bold(`\n${'═'.repeat(60)}`));
+        console.log(chalk.green.bold('✅ PROJECT COMPLETE - Autonomous loop finished'));
+        console.log(chalk.green.bold(`${'═'.repeat(60)}\n`));
+        console.log(chalk.gray(`Total iterations: ${iteration}`));
+        console.log(chalk.gray(`Session ID: ${sessionId}`));
+      } else {
+        console.log(chalk.yellow(`\n⏳ Iteration ${iteration} complete. No completion marker found. Continuing...`));
+
+        // Small delay between iterations to avoid rate limiting
+        await new Promise(resolve => setTimeout(resolve, 2000));
+      }
+    }
+
+    if (!isComplete) {
+      console.log(chalk.yellow.bold(`\n⚠️ Maximum iterations (${MAX_ITERATIONS}) reached without completion.`));
+      console.log(chalk.gray(`You can resume this session with: claude --resume ${sessionId}`));
+    }
+
+  } catch (error) {
+    console.error(chalk.red('\n✗ Error in Claude Unlimited mode:'), error instanceof Error ? error.message : String(error));
+    console.log(chalk.gray(`\nSession ID for debugging: ${sessionId}`));
+    process.exit(1);
+  }
+}
+
+/**
+ * Start a project with Unattended Autonomous mode - interactive with auto-continue
+ *
+ * This mode:
+ * 1. Runs Claude interactively so user can see and interact
+ * 2. After each response, waits briefly for user input
+ * 3. If no input within timeout, auto-sends continue message
+ * 4. User can type custom messages anytime
+ * 5. Continues until PROJECT COMPLETE is detected
+ */
+async function projectStartWithUnattendedAutonomous(
+  projectIdentifier: string,
+  _options: ProjectStartOptions
+): Promise<void> {
+  const { spawn } = await import('child_process');
+  const { randomUUID } = await import('crypto');
+  const path = await import('path');
+  const fs = await import('fs/promises');
+  const os = await import('os');
+  const readline = await import('readline');
+
+  console.log(chalk.blue.bold('\n🤖 Starting Unattended Autonomous Mode\n'));
+  console.log(chalk.gray('Claude will run interactively - you\'ll see full TUI with thinking/tools.'));
+  console.log(chalk.gray('Responses are logged to .autonomous/responses/ for history.'));
+  console.log(chalk.gray('Type "done" after a session to stop, or just let it keep going.\n'));
+
+  // Parse project number
+  const projectNumber = parseInt(projectIdentifier);
+  if (isNaN(projectNumber)) {
+    console.error(chalk.red('Error: --ua mode requires a numeric project number.'));
+    console.error(chalk.gray('Usage: auto project start --ua <project-number>'));
+    process.exit(1);
+  }
+
+  // Generate a unique session ID for this autonomous run
+  const sessionId = randomUUID();
+  console.log(chalk.gray(`Session ID: ${sessionId}\n`));
+
+  // Initialize response tracking for this session
+  const autonomousDataDir = path.join(process.cwd(), '.autonomous');
+  const responseTracker = new ResponseTracker(autonomousDataDir);
+  await responseTracker.initSession(sessionId, `project-${projectNumber}`, process.cwd());
+
+  // Create response watcher
+  const responseWatcher = new ResponseWatcher(responseTracker, sessionId);
+  await responseWatcher.start();
+
+  console.log(chalk.gray(`Response history: .autonomous/responses/${sessionId}.json\n`));
+
+  // Install the post-prompt hook for deterministic response detection
+  const { generatePostPromptHook } = await import('../../utils/response-tracker.js');
+  const claudeDir = path.join(process.cwd(), '.claude');
+  const hooksDir = path.join(claudeDir, 'hooks');
+  await fs.mkdir(hooksDir, { recursive: true });
+
+  // Create the post-prompt hook script
+  const postPromptHookScript = generatePostPromptHook(autonomousDataDir, sessionId, `project-${projectNumber}`);
+  const postPromptHookPath = path.join(hooksDir, 'autonomous-post-prompt.sh');
+  await fs.writeFile(postPromptHookPath, postPromptHookScript, 'utf-8');
+  await fs.chmod(postPromptHookPath, 0o755);
+
+  // Register hook in settings.json
+  const settingsPath = path.join(claudeDir, 'settings.json');
+  let settings: Record<string, unknown> = {};
+  try {
+    const existingSettings = await fs.readFile(settingsPath, 'utf-8');
+    settings = JSON.parse(existingSettings);
+  } catch {
+    // No existing settings
+  }
+
+  // Configure hooks - Stop hook fires when Claude finishes responding
+  settings.hooks = {
+    ...((settings.hooks as Record<string, unknown>) || {}),
+    Stop: [
+      {
+        matcher: '',
+        hooks: [
+          {
+            type: 'command',
+            command: postPromptHookPath,
+          },
+        ],
+      },
+    ],
+  };
+  await fs.writeFile(settingsPath, JSON.stringify(settings, null, 2), 'utf-8');
+  console.log(chalk.gray('Installed response tracking hook.\n'));
+
+  // Set up response watcher event handlers
+  let lastResponseCount = 0;
+  responseWatcher.on('response', (response) => {
+    lastResponseCount++;
+    console.log(chalk.gray(`\n📝 Response ${lastResponseCount} captured at ${response.timestamp}`));
+    if (response.hasCompletionSignal) {
+      console.log(chalk.green('🎉 PROJECT COMPLETE signal detected!'));
+    }
+  });
+
+  // Read the project prompt template
+  const promptFile = path.join(os.homedir(), '.claude-prompt', 'project.prompt');
+  let basePrompt: string;
+  try {
+    basePrompt = await fs.readFile(promptFile, 'utf-8');
+  } catch (err) {
+    console.error(chalk.red(`Error: Prompt file not found: ${promptFile}`));
+    console.error(chalk.gray('Please create the prompt file with your project instructions.'));
+    process.exit(1);
+  }
+
+  // Build the system prompt
+  const systemPrompt = `IMPORTANT — PROJECT SELECTION IS NOT AMBIGUOUS.
+
+You MUST operate ONLY on the GitHub Project with the following explicit number:
+
+PROJECT NUMBER: ${projectNumber}
+
+Do not attempt to infer or detect other project numbers. All work MUST be done inside this specific project.
+
+---------------------------------------------------------------------
+
+${basePrompt}
+
+---------------------------------------------------------------------
+
+AUTONOMOUS MODE INSTRUCTIONS:
+When you have completed ALL work items in the project and there is nothing left to do,
+you MUST end your response with the exact phrase: PROJECT COMPLETE
+
+If there is still work remaining, do NOT include "PROJECT COMPLETE" in your response.`;
+
+  const MAX_ITERATIONS = 100;
+  const AUTO_CONTINUE_DELAY = 10000; // 10 seconds
+  let iteration = 0;
+  let isComplete = false;
+
+  /**
+   * Run Claude interactively with full TUI visible
+   * Returns true if user wants to continue, false to stop
+   */
+  async function runClaudeInteractive(prompt: string, isResume: boolean): Promise<boolean> {
+    return new Promise((resolve) => {
+      const args: string[] = [
+        '--dangerously-skip-permissions',
+      ];
+
+      if (isResume) {
+        args.push('--resume', sessionId);
+      } else {
+        args.push('--session-id', sessionId);
+        args.push('--append-system-prompt', systemPrompt);
+        args.push(prompt);
+      }
+
+      console.log(chalk.cyan(`\n${'━'.repeat(70)}`));
+      console.log(chalk.cyan.bold(` 🔄 Iteration ${iteration + 1}${isResume ? ' (continuing)' : ' (starting)'}`));
+      console.log(chalk.cyan(`${'━'.repeat(70)}\n`));
+
+      // Run Claude with full interactive TUI
+      const child = spawn('claude', args, {
+        cwd: process.cwd(),
+        env: process.env,
+        stdio: 'inherit', // Full passthrough - user sees everything
+      });
+
+      child.on('error', (err) => {
+        console.error(chalk.red(`Failed to start Claude: ${err.message}`));
+        resolve(false);
+      });
+
+      child.on('close', (code) => {
+        console.log(''); // New line after Claude exits
+        if (code === 0 || code === null) {
+          // Claude exited normally - ask if we should continue
+          resolve(true);
+        } else {
+          console.log(chalk.yellow(`Claude exited with code ${code}`));
+          resolve(false);
+        }
+      });
+    });
+  }
+
+  /**
+   * Wait for user input with timeout, returns user input or null for auto-continue
+   */
+  async function waitForInputWithTimeout(timeoutMs: number): Promise<string | null> {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    return new Promise((resolve) => {
+      let countdown = Math.ceil(timeoutMs / 1000);
+      let resolved = false;
+
+      const updatePrompt = () => {
+        if (!resolved) {
+          process.stdout.write(`\r${chalk.yellow(`⏳ Auto-continuing in ${countdown}s... `)}${chalk.gray('(type to override, Enter to continue now)')}`);
+        }
+      };
+
+      updatePrompt();
+
+      const timer = setInterval(() => {
+        countdown--;
+        if (countdown <= 0) {
+          clearInterval(timer);
+          if (!resolved) {
+            resolved = true;
+            rl.close();
+            console.log(chalk.cyan('\n\n→ Auto-continuing...'));
+            resolve(null);
+          }
+        } else {
+          updatePrompt();
+        }
+      }, 1000);
+
+      rl.on('line', (input) => {
+        if (!resolved) {
+          resolved = true;
+          clearInterval(timer);
+          rl.close();
+          resolve(input.trim() || null);
+        }
+      });
+
+      // Handle Ctrl+C
+      rl.on('close', () => {
+        if (!resolved) {
+          resolved = true;
+          clearInterval(timer);
+        }
+      });
+    });
+  }
+
+  // Initial prompt
+  const initialPrompt = `Begin working on GitHub Project #${projectNumber}. Start by identifying the active Phase and its work items. Work through each item systematically.`;
+
+  try {
+    while (!isComplete && iteration < MAX_ITERATIONS) {
+      // Run Claude interactively - user sees full TUI
+      const shouldContinue = await runClaudeInteractive(initialPrompt, iteration > 0);
+      iteration++;
+
+      if (!shouldContinue) {
+        console.log(chalk.yellow('\n⏹ Claude exited with error.'));
+        break;
+      }
+
+      // Check response tracker for completion signal (deterministic detection via hook)
+      const sessionHistory = await responseTracker.getHistory(sessionId);
+      if (sessionHistory?.isComplete) {
+        isComplete = true;
+        console.log(chalk.green.bold(`\n${'═'.repeat(70)}`));
+        console.log(chalk.green.bold(' 🎉 PROJECT COMPLETE detected via response tracker'));
+        console.log(chalk.green.bold(`${'═'.repeat(70)}\n`));
+        console.log(chalk.gray(`Total iterations: ${iteration}`));
+        console.log(chalk.gray(`Session ID: ${sessionId}`));
+        console.log(chalk.gray(`Responses captured: ${sessionHistory.responseCount}`));
+        break;
+      }
+
+      // Check latest response for blocked/failed status
+      const latestResponse = sessionHistory?.responses[sessionHistory.responses.length - 1];
+      if (latestResponse?.isBlocked) {
+        console.log(chalk.yellow.bold(`\n⚠️ BLOCKED: ${latestResponse.blockReason || 'Unknown reason'}`));
+        console.log(chalk.gray('Session paused. You may need to intervene manually.'));
+      }
+      if (latestResponse?.isFailed) {
+        console.log(chalk.red.bold(`\n❌ FAILED: ${latestResponse.failReason || 'Unknown reason'}`));
+      }
+
+      // After Claude exits (user pressed Esc), ask if we should continue
+      console.log(chalk.gray(`\n${'─'.repeat(70)}`));
+      console.log(chalk.cyan.bold('Claude session ended.'));
+      console.log(chalk.gray('Type "done" if project is complete, or wait for auto-continue...'));
+
+      const userInput = await waitForInputWithTimeout(AUTO_CONTINUE_DELAY);
+
+      if (userInput !== null) {
+        const input = userInput.toLowerCase().trim();
+        if (input === 'done' || input === 'stop' || input === 'q' || input === 'quit') {
+          isComplete = true;
+          console.log(chalk.green.bold(`\n${'═'.repeat(70)}`));
+          console.log(chalk.green.bold(' ✅ Session ended by user'));
+          console.log(chalk.green.bold(`${'═'.repeat(70)}\n`));
+          console.log(chalk.gray(`Total iterations: ${iteration}`));
+          console.log(chalk.gray(`Session ID: ${sessionId}`));
+          break;
+        }
+      }
+
+      // Auto-continue with --resume
+      console.log(chalk.cyan('\n→ Auto-resuming session...'));
+    }
+
+    if (!isComplete && iteration >= MAX_ITERATIONS) {
+      console.log(chalk.yellow.bold(`\n⚠️ Maximum iterations (${MAX_ITERATIONS}) reached.`));
+      console.log(chalk.gray(`You can resume this session with: claude --resume ${sessionId}`));
+    }
+
+    // Print response history summary
+    const finalHistory = await responseTracker.getHistory(sessionId);
+    if (finalHistory) {
+      console.log(chalk.gray(`\n📊 Session Summary:`));
+      console.log(chalk.gray(`   Responses captured: ${finalHistory.responseCount}`));
+      console.log(chalk.gray(`   History file: .autonomous/responses/${sessionId}.json`));
+    }
+
+  } catch (error) {
+    console.error(chalk.red('\n✗ Error in Unattended Autonomous mode:'), error instanceof Error ? error.message : String(error));
+    console.log(chalk.gray(`\nSession ID for debugging: ${sessionId}`));
+    process.exit(1);
+  } finally {
+    // Clean up response watcher
+    responseWatcher.stop();
+  }
 }
 
 /**

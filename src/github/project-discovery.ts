@@ -685,4 +685,56 @@ export class ProjectDiscovery {
       throw new Error(`Failed to link project to repo: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
+
+  /**
+   * Update the title of a GitHub Project v2
+   *
+   * @param projectId The project's GraphQL ID
+   * @param newTitle The new title for the project
+   */
+  async updateProjectTitle(projectId: string, newTitle: string): Promise<void> {
+    const mutation = `
+      mutation {
+        updateProjectV2(input: { projectId: "${projectId}", title: "${newTitle.replace(/"/g, '\\"')}" }) {
+          projectV2 {
+            id
+            title
+          }
+        }
+      }
+    `;
+
+    try {
+      execSync(`gh api graphql -f query='${mutation}'`, {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      throw new Error(`Failed to update project title: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  /**
+   * Delete a GitHub Project
+   */
+  async deleteProject(projectId: string): Promise<void> {
+    const mutation = `
+      mutation {
+        deleteProjectV2(input: { projectId: "${projectId}" }) {
+          projectV2 {
+            id
+          }
+        }
+      }
+    `;
+
+    try {
+      execSync(`gh api graphql -f query='${mutation}'`, {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } catch (error) {
+      throw new Error(`Failed to delete project: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 }

@@ -301,11 +301,9 @@ export function ProjectCreationApp({
     return (
       <Box flexDirection="column" padding={1}>
         <Text bold color="cyan">📋 Project Creation - Generating Product Strategy</Text>
-        <Box marginTop={1}>
-          <Text color="green">
-            <Spinner type="dots" />
-          </Text>
-          <Text> Generating product strategy...</Text>
+        <Box marginTop={1} gap={1}>
+          <Spinner type="dots" />
+          <Text>Generating product strategy...</Text>
         </Box>
         <Box marginTop={1}>
           <Text dimColor>Description: {description}</Text>
@@ -359,16 +357,14 @@ export function ProjectCreationApp({
     return (
       <Box flexDirection="column" padding={1}>
         <Text bold color="cyan">📋 Project Creation - Processing</Text>
-        <Box marginTop={1}>
-          <Text color="green">
-            <Spinner type="dots" />
-          </Text>
+        <Box marginTop={1} gap={1}>
+          <Spinner type="dots" />
           <Text>
             {isRefining
-              ? ' Refining based on feedback...'
+              ? 'Refining based on feedback...'
               : isGeneratingPlan
-                ? ' Generating implementation plan...'
-                : ' Processing...'}
+                ? 'Generating implementation plan...'
+                : 'Processing...'}
           </Text>
         </Box>
       </Box>
