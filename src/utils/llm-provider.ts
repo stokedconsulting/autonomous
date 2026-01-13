@@ -1,7 +1,7 @@
 import { LLMProvider } from '../types/assignments.js';
 import { AutonomousConfig } from '../types/config.js';
 
-export const LLM_PROVIDERS: LLMProvider[] = ['claude', 'gemini', 'codex'];
+export const LLM_PROVIDERS: LLMProvider[] = ['claude', 'gemini', 'codex', 'stoked'];
 
 export function parseLLMProvider(value: string): LLMProvider | null {
   const normalized = value.trim().toLowerCase();

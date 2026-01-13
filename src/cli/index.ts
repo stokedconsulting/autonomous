@@ -251,6 +251,7 @@ project
   .option('--review', 'Review and iterate on the plan before creating')
   .option('--reviewed', 'Two-stage review workflow: PM strategy → Engineering plan (with Ink UI)')
   .option('--start', 'Start autonomous work immediately after creating the project')
+  .option('--provider <provider>', 'LLM provider to use (claude, gemini, codex, stoked)')
   .option('-v, --verbose', 'Show detailed output')
   .action((description: string[], options: any) => {
     // Join all description parts into a single string
@@ -267,6 +268,7 @@ project
   .description('Add issues to an EXISTING GitHub Project from a description')
   .requiredOption('--project <identifier>', 'Target project (number or name) to add issues to')
   .option('--start', 'Start autonomous work immediately after adding issues')
+  .option('--provider <provider>', 'LLM provider to use (claude, gemini, codex, stoked)')
   .option('-v, --verbose', 'Show detailed output')
   .action(projectAddCommand);
 

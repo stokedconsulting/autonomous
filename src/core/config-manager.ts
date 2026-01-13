@@ -19,7 +19,7 @@ const DEFAULT_CONFIG: AutonomousConfig = {
       hooksEnabled: true,
     },
     gemini: {
-      enabled: false,
+      enabled: true,
       maxConcurrentIssues: 3,
       hooksEnabled: false,
     },
@@ -27,6 +27,12 @@ const DEFAULT_CONFIG: AutonomousConfig = {
       enabled: false,
       maxConcurrentIssues: 3,
       hooksEnabled: false,
+    },
+    stoked: {
+      enabled: true,
+      maxConcurrentIssues: 3,
+      hooksEnabled: true,
+      backend: 'gemini',
     },
   },
   github: {

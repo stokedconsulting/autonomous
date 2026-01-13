@@ -352,14 +352,14 @@ export class Orchestrator {
    */
   async stop(): Promise<void> {
     console.log(chalk.blue('\n🛑 Stopping orchestrator...\n'));
-    
+
     // Check for dev-complete items that need merging
     const devCompleteItems = this.assignmentManager.getAssignmentsByStatus('dev-complete');
-    
+
     if (devCompleteItems.length > 0 && this.mergeWorker) {
       console.log(chalk.yellow(`⚠️  Found ${devCompleteItems.length} dev-complete item(s) awaiting merge`));
       console.log(chalk.blue('📋 Processing final merges before shutdown...\n'));
-      
+
       try {
         await this.mergeWorker.processDevCompleteItems(!!this.epicOrchestrator);
         console.log(chalk.green('✓ All pending merges completed\n'));
@@ -368,7 +368,7 @@ export class Orchestrator {
         console.log(chalk.yellow('Some items may still be in dev-complete status\n'));
       }
     }
-    
+
     this.isRunning = false;
 
     // Stop watching config file
@@ -387,7 +387,7 @@ export class Orchestrator {
         }
       }
     }
-    
+
     console.log(chalk.green('✓ Orchestrator stopped\n'));
   }
 
@@ -711,8 +711,8 @@ export class Orchestrator {
 
       // Skip if already assigned or in progress
       if (existingAssignment &&
-          (existingAssignment.status === 'assigned' ||
-           existingAssignment.status === 'in-progress')) {
+        (existingAssignment.status === 'assigned' ||
+          existingAssignment.status === 'in-progress')) {
         skippedCount++;
         if (this.verbose) {
           console.log(chalk.yellow(`  Skipping #${issue.number}: already ${existingAssignment.status} (${existingAssignment.llmInstanceId})`));
@@ -722,8 +722,8 @@ export class Orchestrator {
 
       // Skip if already completed
       if (existingAssignment &&
-          (existingAssignment.status === 'dev-complete' ||
-           existingAssignment.status === 'merged')) {
+        (existingAssignment.status === 'dev-complete' ||
+          existingAssignment.status === 'merged')) {
         skippedCount++;
         if (this.verbose) {
           console.log(chalk.yellow(`  Skipping #${issue.number}: already ${existingAssignment.status}`));
@@ -2045,11 +2045,11 @@ The autonomous system is resuming work on this issue. The LLM will address the r
     // This handles the case where assignments.json was cleared but GitHub still has In Progress items
     if (this.projectsAPI && this.fieldMapper) {
       console.log(chalk.blue('Checking for orphaned GitHub assignments...'));
-      
+
       try {
         const config = this.configManager.getConfig();
         const assignedInstanceFieldName = config.project?.fields.assignedInstance?.fieldName || 'Assigned Instance';
-        
+
         // Query GitHub for ALL In Progress items (not just first 100)
         const allItems = await this.projectsAPI.getAllItems({
           status: ['In Progress'],
@@ -2060,7 +2060,7 @@ The autonomous system is resuming work on this issue. The LLM will address the r
         for (const item of allItems) {
           // Check if item has an assigned instance
           const assignedInstance = item.fieldValues?.[assignedInstanceFieldName];
-          
+
           if (!assignedInstance || typeof assignedInstance !== 'string') {
             continue; // No assigned instance, skip
           }
@@ -2072,7 +2072,7 @@ The autonomous system is resuming work on this issue. The LLM will address the r
 
           // Check if we have a local assignment for this issue
           const existingAssignment = this.assignmentManager.getAssignmentByIssue(issueNumber);
-          
+
           if (!existingAssignment) {
             // Orphaned assignment! GitHub has it but we don't
             console.log(chalk.yellow(`\n⚠️  Orphaned assignment detected: #${issueNumber}`));
@@ -2087,11 +2087,11 @@ The autonomous system is resuming work on this issue. The LLM will address the r
 
             try {
               const issue = await this.githubAPI.getIssue(issueNumber);
-              
+
               // Determine worktree path
               const projectName = basename(this.projectPath);
               const worktreePath = join(dirname(this.projectPath), `${projectName}-issue-${issueNumber}`);
-              
+
               // Create assignment with basic info
               const newAssignment = await this.assignmentManager.createAssignment({
                 issueNumber: issue.number,
@@ -2200,7 +2200,7 @@ The autonomous system is resuming work on this issue. The LLM will address the r
             (isPhaseMaster && hasPR);
 
           if (isComplete) {
-            // SUCCESS: Session completed normally, not a dead process
+            // SUCCESS: Session completed normally
             console.log(chalk.green(`\n✓ Session completed successfully for issue #${assignment.issueNumber}`));
             console.log(chalk.gray(`   Instance: ${assignment.llmInstanceId}`));
 
@@ -2212,9 +2212,23 @@ The autonomous system is resuming work on this issue. The LLM will address the r
               console.log(chalk.gray(`   Detection: Pattern matching (${sessionAnalysis.indicators.slice(0, 3).join(', ')})`));
             }
 
-            // Update assignment status to dev-complete
+            // Default status
+            let targetStatus = 'dev-complete';
+            let targetGitHubStatus = 'Dev Complete';
+
+            // Check if StokedAdapter wants to enforce a specific workflow
+            if (adapter.provider === 'stoked') {
+              // We can't easily import StokedAdapter class here due to circular deps potential or just architecture
+              // But we can check the provider string and cast if needed, or simply trust the provider check
+              // For now, let's assume we want 'In Review' if it's Stoked
+              targetStatus = 'in-review';
+              targetGitHubStatus = 'In Review';
+              console.log(chalk.blue(`   Displaying Stoked "In Review" status enforcement`));
+            }
+
+            // Update assignment status
             await this.assignmentManager.updateAssignment(assignment.id, {
-              status: 'dev-complete',
+              status: targetStatus === 'in-review' ? 'in-review' : 'dev-complete',
               completedAt: new Date().toISOString(),
             });
 
@@ -2225,12 +2239,11 @@ The autonomous system is resuming work on this issue. The LLM will address the r
                   throw new Error('No projectItemId on assignment');
                 }
 
-                const devCompleteStatus = 'Dev Complete';
                 await this.projectsAPI.updateItemStatusByValue(
                   assignment.projectItemId,
-                  devCompleteStatus
+                  targetGitHubStatus
                 );
-                console.log(chalk.green(`   ✓ Updated GitHub project status to "Dev Complete"`));
+                console.log(chalk.green(`   ✓ Updated GitHub project status to "${targetGitHubStatus}"`));
 
                 // Clear assigned instance since work is complete
                 await this.assignmentManager.updateAssignedInstanceWithSync(assignment.id, null);

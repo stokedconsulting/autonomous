@@ -17,7 +17,7 @@ export type AssignmentStatus =
   | 'stage-ready'    // Merged to stage, ready for main
   | 'merged';        // Merged to main, fully complete
 
-export type LLMProvider = 'claude' | 'gemini' | 'codex';
+export type LLMProvider = 'claude' | 'gemini' | 'codex' | 'stoked';
 
 export interface WorkSession {
   startedAt: string;

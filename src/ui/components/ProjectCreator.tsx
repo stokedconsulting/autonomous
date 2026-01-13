@@ -36,10 +36,12 @@ type WorkflowStage =
   | 'complete'         // Success
   | 'error';           // Error state
 
+import { LLMAdapter } from '../../llm/adapter.js';
+
 interface ProjectCreatorProps {
   owner: string;
   repo: string;
-  claudePath: string;
+  adapter: LLMAdapter;
   workingDirectory: string;
   projectConfig: ProjectConfig;
   onComplete: () => void;
@@ -49,7 +51,7 @@ interface ProjectCreatorProps {
 export function ProjectCreator({
   owner,
   repo,
-  claudePath,
+  adapter,
   workingDirectory,
   projectConfig,
   onComplete,
@@ -119,7 +121,7 @@ export function ProjectCreator({
     setProgress('Generating project plan with Claude...');
 
     try {
-      const plan = await generateProjectPlan(projectDescription, claudePath, workingDirectory);
+      const plan = await generateProjectPlan(projectDescription, adapter, workingDirectory);
       setCurrentPlan(plan);
       // Skip review - go directly to creating project
       await handleApprovePlan(plan);
@@ -137,7 +139,7 @@ export function ProjectCreator({
     setProgress('Refining plan based on your feedback...');
 
     try {
-      const refinedPlan = await refineProjectPlan(currentPlan, feedback, claudePath, workingDirectory);
+      const refinedPlan = await refineProjectPlan(currentPlan, feedback, adapter, workingDirectory);
       setCurrentPlan(refinedPlan);
       setStage('review');
     } catch (err) {

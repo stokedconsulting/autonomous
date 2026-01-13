@@ -12,6 +12,50 @@ import { AutonomousConfig } from '../../types/config.js';
 import { GitHubProjectsAPI } from '../../github/projects-api.js';
 import { resolveProjectId } from '../../github/project-resolver.js';
 
+/**
+ * Extract detailed error message from zx command errors.
+ * zx errors contain stdout, stderr, and exitCode properties
+ * that provide more context than just error.message.
+ */
+function getZxErrorMessage(error: unknown): string {
+  if (!error || typeof error !== 'object') {
+    return String(error);
+  }
+
+  const err = error as Record<string, unknown>;
+  const parts: string[] = [];
+
+  // Check for zx-specific properties
+  if ('stderr' in err && err.stderr) {
+    const stderr = String(err.stderr).trim();
+    if (stderr) parts.push(stderr);
+  }
+
+  if ('stdout' in err && err.stdout) {
+    const stdout = String(err.stdout).trim();
+    // Only include stdout if stderr didn't have the info
+    if (stdout && !parts.some(p => p.includes(stdout.substring(0, 50)))) {
+      parts.push(stdout);
+    }
+  }
+
+  // Fall back to message if we don't have stderr/stdout
+  if (parts.length === 0) {
+    if ('message' in err && err.message) {
+      parts.push(String(err.message));
+    } else {
+      parts.push(String(error));
+    }
+  }
+
+  // Include exit code if available
+  if ('exitCode' in err && err.exitCode !== undefined) {
+    parts.push(`exit code: ${err.exitCode}`);
+  }
+
+  return parts.join('\n    ');
+}
+
 interface PushOptions {
   pr?: boolean;
   skipMainConflictCheck?: boolean;
@@ -50,7 +94,8 @@ export async function pushCommand(options: PushOptions): Promise<void> {
 
     console.log(chalk.green('\n✓ Push complete!'));
   } catch (error: unknown) {
-    console.error(chalk.red('\n✗ Error during push:'), error instanceof Error ? error.message : String(error));
+    console.error(chalk.red('\n✗ Error during push:'));
+    console.error(chalk.red('    ' + getZxErrorMessage(error)));
     process.exit(1);
   }
 }
@@ -75,11 +120,11 @@ async function generateChangeset(cwd: string, claudePath: string): Promise<void>
   // Get all modified/added/renamed tracked files (staged + unstaged)
   const diffResult = await $`git diff --name-only --diff-filter=ACMRT ${baseRef}`;
   const trackedFiles = diffResult.stdout.trim().split('\n').filter(Boolean);
-  
+
   // Get untracked files
   const untrackedResult = await $`git ls-files --others --exclude-standard`;
   const untrackedFiles = untrackedResult.stdout.trim().split('\n').filter(Boolean);
-  
+
   // Combine all changed files
   const changedFiles = [...trackedFiles, ...untrackedFiles];
 
@@ -146,6 +191,8 @@ ${packageList}
 
   console.log(chalk.gray('  Asking Claude to analyze changes...'));
 
+  // Unset ANTHROPIC_API_KEY to use desktop app session instead of API
+  delete process.env.ANTHROPIC_API_KEY;
   const result = await $`echo ${prompt} | ${claudePath} --dangerously-skip-permissions chat`;
   const content = result.stdout.trim();
 
@@ -259,7 +306,7 @@ async function checkAndResolveMainConflicts(claudePath: string): Promise<void> {
       throw error; // Re-throw conflict resolution failures
     }
     console.log(chalk.yellow('  Warning: Could not check for main conflicts'));
-    console.log(chalk.gray(`  ${error instanceof Error ? error.message : String(error)}`));
+    console.log(chalk.gray(`  ${getZxErrorMessage(error)}`));
   }
 }
 
@@ -352,6 +399,8 @@ detection and automatic theme switching.`;
 
   console.log(chalk.gray('  Generating commit message...'));
 
+  // Unset ANTHROPIC_API_KEY to use desktop app session instead of API
+  delete process.env.ANTHROPIC_API_KEY;
   const msgResult = await $`echo ${commitPrompt} | ${claudePath} --dangerously-skip-permissions chat`;
   let msg = msgResult.stdout.trim();
 
@@ -415,7 +464,7 @@ detection and automatic theme switching.`;
     if (errorMsg.includes('ERROR') && (errorMsg.includes('lint') || errorMsg.includes('type-check') || errorMsg.includes('turbo'))) {
       const hasLintError = errorMsg.includes('lint');
       const hasTypeError = errorMsg.includes('type-check');
-      
+
       console.log(chalk.yellow(`  Pre-push hook failed (${hasLintError ? 'lint' : ''}${hasLintError && hasTypeError ? ' and ' : ''}${hasTypeError ? 'type-check' : ''}). Attempting to fix...`));
 
       try {
@@ -441,7 +490,7 @@ detection and automatic theme switching.`;
           } catch {
             // Lint might have passed, try type-check
           }
-          
+
           try {
             await fixTypeErrors(claudePath);
             fixesApplied = true;
@@ -583,6 +632,8 @@ Adds cookie-based authentication system with JWT tokens.
 - Add auth middleware
 - Update frontend auth state management`;
 
+    // Unset ANTHROPIC_API_KEY to use desktop app session instead of API
+    delete process.env.ANTHROPIC_API_KEY;
     const prResult = await $`echo ${prPrompt} | ${claudePath} --dangerously-skip-permissions chat`;
     const prContent = prResult.stdout.trim();
 
@@ -642,7 +693,7 @@ async function updateProjectStatusToInReview(branch: string, config: AutonomousC
     await projectsAPI.updateItemStatus(projectItemId, 'in-review');
     console.log(chalk.green(`  ✓ Updated issue #${issueNumber} status to "In Review"`));
   } catch (error: unknown) {
-    console.log(chalk.yellow(`  ⚠️  Could not update project status: ${error instanceof Error ? error.message : String(error)}`));
+    console.log(chalk.yellow(`  ⚠️  Could not update project status: ${getZxErrorMessage(error)}`));
   }
 }
 
@@ -735,7 +786,7 @@ async function fixLintErrors(_claudePath: string): Promise<void> {
         // Lint failed - there are actual errors that auto-fix couldn't handle
         console.log(chalk.yellow('  ⚠️  Auto-fix could not resolve all errors'));
         console.log(chalk.blue('  🤖 Attempting intelligent fix with Claude...'));
-        
+
         try {
           await fixLintErrorsWithClaude(_claudePath, lintCommand);
           console.log(chalk.green('  ✓ Lint errors fixed by Claude'));
@@ -773,7 +824,7 @@ async function fixLintErrorsWithClaude(claudePath: string, lintCommand: string):
   }
 
   // Extract actual errors (not warnings) from lint output
-  const errorLines = lintOutput.split('\n').filter(line => 
+  const errorLines = lintOutput.split('\n').filter(line =>
     line.includes('error  ') || line.includes('✖')
   );
 
@@ -822,6 +873,8 @@ Then respond with a brief summary of what you fixed.`;
 
   console.log(chalk.gray('  Asking Claude to analyze and fix errors...'));
 
+  // Unset ANTHROPIC_API_KEY to use desktop app session instead of API
+  delete process.env.ANTHROPIC_API_KEY;
   const result = await $`echo ${fixPrompt} | ${claudePath} --dangerously-skip-permissions chat`;
   const summary = result.stdout.trim();
 
@@ -852,7 +905,7 @@ Then respond with a brief summary of what you fixed.`;
       }
     }
 
-    const newErrorLines = newLintOutput.split('\n').filter(line => 
+    const newErrorLines = newLintOutput.split('\n').filter(line =>
       line.includes('error  ')
     );
 
@@ -979,6 +1032,8 @@ Then respond with a brief summary of what you fixed.`;
 
   console.log(chalk.gray('  Asking Claude to analyze and fix type errors...'));
 
+  // Unset ANTHROPIC_API_KEY to use desktop app session instead of API
+  delete process.env.ANTHROPIC_API_KEY;
   const result = await $`echo ${fixPrompt} | ${claudePath} --dangerously-skip-permissions chat`;
   const summary = result.stdout.trim();
 
@@ -1084,6 +1139,8 @@ ${conflictContent}
 
     console.log(chalk.gray('    Asking Claude architect to analyze and resolve conflict...'));
 
+    // Unset ANTHROPIC_API_KEY to use desktop app session instead of API
+    delete process.env.ANTHROPIC_API_KEY;
     const resolveResult = await $`echo ${conflictPrompt} | ${claudePath} --dangerously-skip-permissions chat`;
     let resolvedContent = resolveResult.stdout.trim();
 

@@ -10,6 +10,7 @@ import { Divider } from '../atoms/Divider.js';
 import { TimeAgo } from '../atoms/TimeAgo.js';
 import { useOrchestratorStore } from '../stores/orchestrator-store.js';
 import { useUIStore } from '../stores/ui-store.js';
+import { useAssignmentStore } from '../stores/assignment-store.js';
 import { useKeyboardNav } from '../hooks/useKeyboardNav.js';
 import { execSync, spawn } from 'child_process';
 
@@ -286,6 +287,16 @@ export function OrchestratorView(): React.ReactElement {
                       <Text bold color="yellow">#{instance.issueNumber}</Text>
                       <Text> - </Text>
                       <Text>{instance.provider}</Text>
+                      {/* Project Context */}
+                      {(() => {
+                        const assignmentStore = useAssignmentStore.getState();
+                        const assignment = assignmentStore.getById(instance.issueNumber);
+                        const projectNum = assignment?.projectNumber;
+                        if (projectNum) {
+                          return <Text dimColor> (Proj #{projectNum})</Text>;
+                        }
+                        return null;
+                      })()}
                     </Box>
                     <Box gap={2}>
                       {instance.status === 'running' && <Spinner />}

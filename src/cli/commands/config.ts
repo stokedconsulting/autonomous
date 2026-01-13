@@ -24,6 +24,7 @@ interface AddLLMOptions {
   maxConcurrent?: number;
   concurrent?: number;
   enableHooks?: boolean;
+  backend?: string;
 }
 
 interface ShowOptions {
@@ -258,6 +259,15 @@ async function addLLM(provider: string, options: AddLLMOptions): Promise<void> {
     if (options.maxConcurrent) updateConfig.maxConcurrentIssues = options.maxConcurrent;
     if (options.concurrent !== undefined) updateConfig.defaultConcurrentIssues = options.concurrent;
     if (options.enableHooks !== undefined) updateConfig.hooksEnabled = options.enableHooks;
+    if (options.backend) {
+      const parsedBackend = parseLLMProvider(options.backend);
+      if (!parsedBackend) {
+        console.error(chalk.red(`Invalid backend: ${options.backend}`));
+        console.log('Valid backends: claude, gemini, codex');
+        process.exit(1);
+      }
+      updateConfig.backend = parsedBackend;
+    }
 
     // Enable the LLM with provided options
     await configManager.enableLLM(parsedProvider, updateConfig);
@@ -292,7 +302,7 @@ async function useLLM(provider: string, options: AddLLMOptions): Promise<void> {
     const parsedProvider = parseLLMProvider(provider);
     if (!parsedProvider) {
       console.error(chalk.red(`Invalid provider: ${provider}`));
-      console.log('Valid providers: claude, gemini, codex');
+      console.log('Valid providers: claude, gemini, codex, stoked');
       process.exit(1);
     }
 
@@ -345,6 +355,16 @@ async function useLLM(provider: string, options: AddLLMOptions): Promise<void> {
 
     if (options.concurrent !== undefined) {
       providerConfig.defaultConcurrentIssues = options.concurrent;
+    }
+
+    if (options.backend) {
+      const parsedBackend = parseLLMProvider(options.backend);
+      if (!parsedBackend) {
+        console.error(chalk.red(`Invalid backend: ${options.backend}`));
+        console.log('Valid backends: claude, gemini, codex');
+        process.exit(1);
+      }
+      providerConfig.backend = parsedBackend;
     }
 
     if (options.apiKey) {

@@ -26,6 +26,7 @@ const PROVIDER_LABELS: Record<LLMProvider, string> = {
   claude: 'Claude (Anthropic)',
   gemini: 'Gemini (Google)',
   codex: 'Codex (OpenAI)',
+  stoked: 'Stoked (Meta-Agent)',
 };
 
 const PROVIDERS_REQUIRING_KEY: LLMProvider[] = ['gemini', 'codex'];

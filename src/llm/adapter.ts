@@ -26,4 +26,6 @@ export interface LLMAdapter {
   supportsHooks(): boolean;
   installHooks(worktreePath: string, assignmentId: string, sessionId?: string): Promise<void>;
   getLastSummary(instanceId: string): Promise<string | null>;
+  prompt(prompt: string): Promise<string>;
+  complete(task: string, assignmentId: string, history?: { role: string; content: string }[], options?: any): Promise<string>;
 }

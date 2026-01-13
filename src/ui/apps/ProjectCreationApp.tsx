@@ -9,9 +9,11 @@ import {
   refineImplementationPlan,
 } from '../../services/project-creation.js';
 
+import { LLMAdapter } from '../../llm/adapter.js';
+
 interface ProjectCreationAppProps {
   description: string;
-  claudePath: string;
+  adapter: LLMAdapter;
   workingDirectory: string;
   onComplete?: (implementationPlanPath: string) => void;
   onCancel?: () => void;
@@ -19,7 +21,7 @@ interface ProjectCreationAppProps {
 
 export function ProjectCreationApp({
   description,
-  claudePath,
+  adapter,
   workingDirectory,
   onComplete,
   onCancel,
@@ -37,7 +39,7 @@ export function ProjectCreationApp({
   // Generate Product Strategy on mount
   useEffect(() => {
     if (state.stage === 'initial') {
-      generateProductStrategy(description, claudePath, workingDirectory)
+      generateProductStrategy(description, adapter, workingDirectory)
         .then((productStrategy) => {
           setState({
             ...state,
@@ -53,7 +55,7 @@ export function ProjectCreationApp({
           });
         });
     }
-  }, [description, claudePath, workingDirectory, state]);
+  }, [description, adapter, workingDirectory, state]);
 
   // Handle Product Strategy review actions
   useEffect(() => {
@@ -61,7 +63,7 @@ export function ProjectCreationApp({
       setState({ ...state, stage: 'creating-project' });
       setScrollOffset(0); // Reset scroll for next stage
 
-      generateImplementationPlan(state.productStrategy, claudePath, workingDirectory)
+      generateImplementationPlan(state.productStrategy, adapter, workingDirectory)
         .then((implementationPlan) => {
           setState({
             ...state,
@@ -81,7 +83,7 @@ export function ProjectCreationApp({
       setState({ ...state, stage: 'creating-project' });
       setScrollOffset(0); // Reset scroll
 
-      refineProductStrategy(state.productStrategy, pendingFeedback, claudePath, workingDirectory)
+      refineProductStrategy(state.productStrategy, pendingFeedback, adapter, workingDirectory)
         .then((productStrategy) => {
           setState({
             ...state,
@@ -100,7 +102,7 @@ export function ProjectCreationApp({
           });
         });
     }
-  }, [reviewAction, pendingFeedback, state, claudePath, workingDirectory]);
+  }, [reviewAction, pendingFeedback, state, adapter, workingDirectory]);
 
   // Handle Implementation Plan review actions
   useEffect(() => {
@@ -115,7 +117,7 @@ export function ProjectCreationApp({
         state.productStrategy,
         state.implementationPlan,
         pendingFeedback,
-        claudePath,
+        adapter,
         workingDirectory
       )
         .then((implementationPlan) => {
@@ -136,7 +138,7 @@ export function ProjectCreationApp({
           });
         });
     }
-  }, [reviewAction, pendingFeedback, state, claudePath, workingDirectory, onComplete]);
+  }, [reviewAction, pendingFeedback, state, adapter, workingDirectory, onComplete]);
 
   // Keyboard input handling with scrolling
   useInput((input, key) => {

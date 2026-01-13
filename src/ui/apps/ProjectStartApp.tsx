@@ -359,6 +359,7 @@ export function ProjectStartApp({
           claude: config.llms.claude.maxConcurrentIssues,
           gemini: config.llms.gemini.maxConcurrentIssues,
           codex: config.llms.codex.maxConcurrentIssues,
+          stoked: config.llms.stoked?.maxConcurrentIssues ?? 1,
         };
         const instanceManager = new InstanceManager(assignmentManager, maxSlots);
 

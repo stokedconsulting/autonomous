@@ -22,6 +22,12 @@ interface CodexInstance {
 }
 
 export class CodexAdapter implements LLMAdapter {
+  async prompt(_prompt: string): Promise<string> {
+    throw new Error("Method 'prompt' not implemented.");
+  }
+  async complete(_task: string, _assignmentId: string, _history?: { role: string; content: string }[], _options?: any): Promise<string> {
+    throw new Error("Method 'complete' not implemented.");
+  }
   readonly provider = 'codex' as const;
   private config: LLMConfig;
   private autonomousDataDir: string;

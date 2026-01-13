@@ -15,6 +15,7 @@ export interface LLMConfig {
   model?: string;
   user?: string; // GitHub username to assign issues to when this LLM takes work
   customConfig?: Record<string, any>;
+  backend?: LLMProvider; // For meta-providers like 'stoked' that wrap other providers
 }
 
 export interface GitHubConfig {

@@ -67,6 +67,7 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
       claude: config.llms.claude.maxConcurrentIssues,
       gemini: config.llms.gemini.maxConcurrentIssues,
       codex: config.llms.codex.maxConcurrentIssues,
+      stoked: config.llms.stoked?.maxConcurrentIssues ?? 1,
     };
     const instanceManager = new InstanceManager(assignmentManager, maxSlots);
 
@@ -117,7 +118,7 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '')
       .substring(0, 50);
-      
+
     const branchName = `${config.worktree.branchPrefix || 'feature/issue-'}${issueNum}-${slugTitle}`;
 
     // Check if worktree already exists
@@ -226,7 +227,7 @@ export async function assignCommand(issueNumber: string, options: AssignOptions)
     const autonomousDataDir = join(cwd, '.autonomous');
     await fs.mkdir(autonomousDataDir, { recursive: true });
 
-    
+
     const llmAdapter = LLMFactory.create([llmProvider], config.llms, autonomousDataDir, options.verbose || false);
 
     await llmAdapter.start({

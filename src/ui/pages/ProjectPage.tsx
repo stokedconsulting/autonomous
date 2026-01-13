@@ -77,14 +77,47 @@ export function ProjectPage(): React.ReactElement {
     debugLog('ProjectPage mounted');
   }, []);
 
-  // Load config
+  const [adapter, setAdapter] = useState<any>(null); // LLMAdapter type
+
+  // Load config and create adapter
   useEffect(() => {
     async function loadConfig() {
       try {
         const { ConfigManager } = await import('../../core/config-manager.js');
+        const { LLMFactory } = await import('../../llm/llm-factory.js');
+
         const configManager = new ConfigManager(process.cwd());
         await configManager.initialize();
-        setConfig(configManager.getConfig());
+        const conf = configManager.getConfig();
+        setConfig(conf);
+
+        if (conf.llms) {
+          try {
+            // Determine available providers
+            const providers = Object.keys(conf.llms);
+
+            // Pick a default: prefer 'stoked', then 'claude', then any enabled
+            let defaultProvider = 'claude';
+            const llmsAny = conf.llms as any;
+
+            if (llmsAny['stoked']?.enabled) {
+              defaultProvider = 'stoked';
+            } else if (llmsAny['claude']?.enabled) {
+              defaultProvider = 'claude';
+            } else {
+              const firstEnabled = providers.find(p => llmsAny[p]?.enabled);
+              if (firstEnabled) defaultProvider = firstEnabled;
+            }
+
+            // Create adapter (verbose=false to avoid log spam in TUI)
+            const dataDir = process.cwd();
+            // Cast defaultProvider to any to satisfy LLMProvider type
+            const createdAdapter = LLMFactory.create([defaultProvider as any], conf.llms, dataDir, false);
+            setAdapter(createdAdapter);
+          } catch (err) {
+            console.error("Failed to create adapter:", err);
+          }
+        }
       } catch (error) {
         setError('Failed to load config');
       }
@@ -249,45 +282,45 @@ export function ProjectPage(): React.ReactElement {
       const hierarchy = projectHierarchies.get(project.number);
       // Hide completed projects (all items Done)
       const isComplete = hierarchy &&
-                        hierarchy.totalItems > 0 &&
-                        hierarchy.completedItems === hierarchy.totalItems;
+        hierarchy.totalItems > 0 &&
+        hierarchy.completedItems === hierarchy.totalItems;
       return !isComplete;
     })
     .forEach(project => {
-    const projectNumber = project.number;
+      const projectNumber = project.number;
 
-    flatItems.push({ type: 'project', projectNumber });
+      flatItems.push({ type: 'project', projectNumber });
 
-    if (expandedProjects.has(projectNumber)) {
-      const hierarchy = projectHierarchies.get(projectNumber);
-      if (hierarchy && !hierarchy.loading) {
-        hierarchy.phases.forEach(phase => {
-          // Phase master
-          if (phase.masterItem) {
-            flatItems.push({
-              type: 'phase-master',
-              projectNumber,
-              phaseNumber: phase.phaseNumber,
-              item: phase.masterItem,
-            });
-          }
-
-          // Phase work items (if phase is expanded)
-          const phaseKey = `${projectNumber}-${phase.phaseNumber}`;
-          if (expandedPhases.has(phaseKey)) {
-            phase.workItems.forEach(item => {
+      if (expandedProjects.has(projectNumber)) {
+        const hierarchy = projectHierarchies.get(projectNumber);
+        if (hierarchy && !hierarchy.loading) {
+          hierarchy.phases.forEach(phase => {
+            // Phase master
+            if (phase.masterItem) {
               flatItems.push({
-                type: 'phase-item',
+                type: 'phase-master',
                 projectNumber,
                 phaseNumber: phase.phaseNumber,
-                item,
+                item: phase.masterItem,
               });
-            });
-          }
-        });
+            }
+
+            // Phase work items (if phase is expanded)
+            const phaseKey = `${projectNumber}-${phase.phaseNumber}`;
+            if (expandedPhases.has(phaseKey)) {
+              phase.workItems.forEach(item => {
+                flatItems.push({
+                  type: 'phase-item',
+                  projectNumber,
+                  phaseNumber: phase.phaseNumber,
+                  item,
+                });
+              });
+            }
+          });
+        }
       }
-    }
-  });
+    });
 
   // Log flatItems state
   useEffect(() => {
@@ -628,7 +661,7 @@ export function ProjectPage(): React.ReactElement {
       config.github.repo,
       api,
       newProject.number,
-      () => {} // No progress callback for now
+      () => { } // No progress callback for now
     );
 
     setProjectHierarchies(new Map()); // Clear cached hierarchies
@@ -641,13 +674,23 @@ export function ProjectPage(): React.ReactElement {
     setReviewedDescriptionSubmitted(false);
   };
 
+  // Ensure we have an adapter before rendering create apps
+  if ((createMode || reviewedMode) && !adapter) {
+    return (
+      <Box flexDirection="column" padding={1}>
+        <Text color="yellow">Initializing AI Adapter...</Text>
+      </Box>
+    );
+  }
+
   // Render ProjectCreator when in create mode
-  if (createMode && config) {
+  if (createMode && config && adapter) {
     return (
       <ProjectCreator
         owner={config.github.owner}
         repo={config.github.repo}
-        claudePath={config.llms?.claude?.cliPath || 'claude'}
+        // claudePath={config.llms?.claude?.cliPath || 'claude'}
+        adapter={adapter}
         workingDirectory={process.cwd()}
         projectConfig={config.project}
         onComplete={handleCreateComplete}
@@ -657,7 +700,7 @@ export function ProjectPage(): React.ReactElement {
   }
 
   // Render ProjectCreationApp when in reviewed mode
-  if (reviewedMode && config) {
+  if (reviewedMode && config && adapter) {
     if (!reviewedDescriptionSubmitted) {
       return (
         <Box flexDirection="column">
@@ -694,7 +737,8 @@ export function ProjectPage(): React.ReactElement {
     return (
       <ProjectCreationApp
         description={reviewedDescription}
-        claudePath={config.llms?.claude?.cliPath || 'claude'}
+        // claudePath={config.llms?.claude?.cliPath || 'claude'}
+        adapter={adapter}
         workingDirectory={process.cwd()}
         onComplete={handleReviewedComplete}
         onCancel={handleReviewedCancel}
@@ -736,119 +780,119 @@ export function ProjectPage(): React.ReactElement {
                 return !project.title.startsWith('[Done]');
               })
               .map((project) => {
-              const projectNumber = project.number;
-              const hierarchy = projectHierarchies.get(projectNumber);
-              const isProjectExpanded = expandedProjects.has(projectNumber);
-              const projectIndex = flatItems.findIndex(
-                item => item.type === 'project' && item.projectNumber === projectNumber
-              );
-              const isProjectSelected = selectedIndex === projectIndex;
+                const projectNumber = project.number;
+                const hierarchy = projectHierarchies.get(projectNumber);
+                const isProjectExpanded = expandedProjects.has(projectNumber);
+                const projectIndex = flatItems.findIndex(
+                  item => item.type === 'project' && item.projectNumber === projectNumber
+                );
+                const isProjectSelected = selectedIndex === projectIndex;
 
-              // Check if project is 100% complete
-              const isComplete = hierarchy &&
-                                hierarchy.totalItems > 0 &&
-                                hierarchy.completedItems === hierarchy.totalItems;
+                // Check if project is 100% complete
+                const isComplete = hierarchy &&
+                  hierarchy.totalItems > 0 &&
+                  hierarchy.completedItems === hierarchy.totalItems;
 
-              // Check if project has items in progress
-              const hasInProgress = hierarchy &&
-                                   hierarchy.inProgressItems &&
-                                   hierarchy.inProgressItems > 0;
+                // Check if project has items in progress
+                const hasInProgress = hierarchy &&
+                  hierarchy.inProgressItems &&
+                  hierarchy.inProgressItems > 0;
 
-              // Auto-prefix projects based on status
-              let displayTitle = project.title;
-              if (isComplete && !project.title.startsWith('[Done]')) {
-                // Remove [In Progress] if present and add [Done]
-                const baseTitle = project.title.replace('[In Progress] - ', '');
-                displayTitle = `[Done] - ${baseTitle}`;
-              } else if (hasInProgress && !isComplete &&
-                        !project.title.startsWith('[Done]') &&
-                        !project.title.startsWith('[In Progress]')) {
-                displayTitle = `[In Progress] - ${project.title}`;
-              }
+                // Auto-prefix projects based on status
+                let displayTitle = project.title;
+                if (isComplete && !project.title.startsWith('[Done]')) {
+                  // Remove [In Progress] if present and add [Done]
+                  const baseTitle = project.title.replace('[In Progress] - ', '');
+                  displayTitle = `[Done] - ${baseTitle}`;
+                } else if (hasInProgress && !isComplete &&
+                  !project.title.startsWith('[Done]') &&
+                  !project.title.startsWith('[In Progress]')) {
+                  displayTitle = `[In Progress] - ${project.title}`;
+                }
 
-              return (
-                <Box key={project.id} flexDirection="column" marginBottom={1}>
-                  {/* Project Header */}
-                  <Box
-                    borderStyle="single"
-                    borderColor={isProjectSelected ? 'cyan' : 'blue'}
-                    paddingX={1}
-                  >
-                    <Text color={isProjectSelected ? 'cyan' : 'blue'} bold>
-                      {isProjectSelected ? '▶ ' : '  '}{isProjectExpanded ? '📂' : '📁'} {displayTitle}
-                    </Text>
-                    <Text dimColor> (#{projectNumber})</Text>
-                  </Box>
-
-                  {/* Phases (when project expanded) */}
-                  {isProjectExpanded && hierarchy && !hierarchy.loading && (
-                    <Box flexDirection="column" marginLeft={2}>
-                      {hierarchy.phases.map(phase => {
-                        const phaseKey = `${projectNumber}-${phase.phaseNumber}`;
-                        const isPhaseExpanded = expandedPhases.has(phaseKey);
-                        
-                        return (
-                          <Box key={phaseKey} flexDirection="column" marginTop={1}>
-                            {/* Phase Master */}
-                            {phase.masterItem && (() => {
-                              const masterIndex = flatItems.findIndex(
-                                item => item.type === 'phase-master' &&
-                                        item.projectNumber === projectNumber &&
-                                        item.phaseNumber === phase.phaseNumber
-                              );
-                              const isMasterSelected = selectedIndex === masterIndex;
-                              const status = phase.masterItem.fieldValues['Status'];
-                              const icon = getStatusIcon(status);
-                              const color = getStatusColor(status, isMasterSelected);
-                              // Remove " - MASTER" suffix from title
-                              const displayTitle = phase.masterItem.content.title.replace(/ - MASTER$/, '');
-
-                              return (
-                                <Box
-                                  borderStyle="single"
-                                  borderColor={isMasterSelected ? 'cyan' : 'gray'}
-                                  paddingX={1}
-                                >
-                                  <Text color={color}>
-                                    {isMasterSelected ? '▶ ' : '  '}{icon} {isPhaseExpanded ? '▼' : '▶'} {displayTitle}
-                                  </Text>
-                                </Box>
-                              );
-                            })()}
-
-                            {/* Phase Work Items (when phase expanded) */}
-                            {isPhaseExpanded && (
-                              <Box flexDirection="column" marginLeft={2}>
-                                {phase.workItems.map(workItem => {
-                                  const itemIndex = flatItems.findIndex(
-                                    item => item.type === 'phase-item' &&
-                                            item.projectNumber === projectNumber &&
-                                            item.phaseNumber === phase.phaseNumber &&
-                                            item.item.id === workItem.id
-                                  );
-                                  const isItemSelected = selectedIndex === itemIndex;
-                                  const status = workItem.fieldValues['Status'];
-                                  const icon = getStatusIcon(status);
-                                  const color = getStatusColor(status, isItemSelected);
-
-                                  return (
-                                    <Box key={workItem.id} marginTop={0.5}>
-                                      <Text color={color}>
-                                        {isItemSelected ? '▶ ' : '  '}{icon} {workItem.content.title}
-                                      </Text>
-                                    </Box>
-                                  );
-                                })}
-                              </Box>
-                            )}
-                          </Box>
-                        );
-                      })}
+                return (
+                  <Box key={project.id} flexDirection="column" marginBottom={1}>
+                    {/* Project Header */}
+                    <Box
+                      borderStyle="single"
+                      borderColor={isProjectSelected ? 'cyan' : 'blue'}
+                      paddingX={1}
+                    >
+                      <Text color={isProjectSelected ? 'cyan' : 'blue'} bold>
+                        {isProjectSelected ? '▶ ' : '  '}{isProjectExpanded ? '📂' : '📁'} {displayTitle}
+                      </Text>
+                      <Text dimColor> (#{projectNumber})</Text>
                     </Box>
-                  )}
-                </Box>
-              );
-            })}
+
+                    {/* Phases (when project expanded) */}
+                    {isProjectExpanded && hierarchy && !hierarchy.loading && (
+                      <Box flexDirection="column" marginLeft={2}>
+                        {hierarchy.phases.map(phase => {
+                          const phaseKey = `${projectNumber}-${phase.phaseNumber}`;
+                          const isPhaseExpanded = expandedPhases.has(phaseKey);
+
+                          return (
+                            <Box key={phaseKey} flexDirection="column" marginTop={1}>
+                              {/* Phase Master */}
+                              {phase.masterItem && (() => {
+                                const masterIndex = flatItems.findIndex(
+                                  item => item.type === 'phase-master' &&
+                                    item.projectNumber === projectNumber &&
+                                    item.phaseNumber === phase.phaseNumber
+                                );
+                                const isMasterSelected = selectedIndex === masterIndex;
+                                const status = phase.masterItem.fieldValues['Status'];
+                                const icon = getStatusIcon(status);
+                                const color = getStatusColor(status, isMasterSelected);
+                                // Remove " - MASTER" suffix from title
+                                const displayTitle = phase.masterItem.content.title.replace(/ - MASTER$/, '');
+
+                                return (
+                                  <Box
+                                    borderStyle="single"
+                                    borderColor={isMasterSelected ? 'cyan' : 'gray'}
+                                    paddingX={1}
+                                  >
+                                    <Text color={color}>
+                                      {isMasterSelected ? '▶ ' : '  '}{icon} {isPhaseExpanded ? '▼' : '▶'} {displayTitle}
+                                    </Text>
+                                  </Box>
+                                );
+                              })()}
+
+                              {/* Phase Work Items (when phase expanded) */}
+                              {isPhaseExpanded && (
+                                <Box flexDirection="column" marginLeft={2}>
+                                  {phase.workItems.map(workItem => {
+                                    const itemIndex = flatItems.findIndex(
+                                      item => item.type === 'phase-item' &&
+                                        item.projectNumber === projectNumber &&
+                                        item.phaseNumber === phase.phaseNumber &&
+                                        item.item.id === workItem.id
+                                    );
+                                    const isItemSelected = selectedIndex === itemIndex;
+                                    const status = workItem.fieldValues['Status'];
+                                    const icon = getStatusIcon(status);
+                                    const color = getStatusColor(status, isItemSelected);
+
+                                    return (
+                                      <Box key={workItem.id} marginTop={0.5}>
+                                        <Text color={color}>
+                                          {isItemSelected ? '▶ ' : '  '}{icon} {workItem.content.title}
+                                        </Text>
+                                      </Box>
+                                    );
+                                  })}
+                                </Box>
+                              )}
+                            </Box>
+                          );
+                        })}
+                      </Box>
+                    )}
+                  </Box>
+                );
+              })}
           </Box>
         )}
 
@@ -893,8 +937,8 @@ export function ProjectPage(): React.ReactElement {
                 flatItems[selectedIndex].type === 'project'
                   ? `Project #${flatItems[selectedIndex].projectNumber}`
                   : flatItems[selectedIndex].type === 'phase-master'
-                  ? `Phase ${flatItems[selectedIndex].phaseNumber} Master`
-                  : `Phase ${flatItems[selectedIndex].phaseNumber} Item`
+                    ? `Phase ${flatItems[selectedIndex].phaseNumber} Master`
+                    : `Phase ${flatItems[selectedIndex].phaseNumber} Item`
               }
             </Text>
           )}

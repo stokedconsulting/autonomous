@@ -8,12 +8,13 @@
  * Used by both CLI and TUI implementations.
  */
 
-import { spawn } from 'child_process';
-import { execSync } from 'child_process';
-import { promises as fs } from 'fs';
-import { join } from 'path';
 import { GitHubProjectsAPI } from '../github/projects-api.js';
 import { ProductStrategy, ImplementationPlan } from '../types/project-spec.js';
+import { LLMAdapter } from '../llm/adapter.js';
+import { StokedAdapter } from '../llm/stoked-adapter.js';
+import { execSync } from 'child_process';
+import { join } from 'path';
+import { promises as fs } from 'fs';
 
 export interface ParsedPhaseItem {
   title: string;
@@ -43,9 +44,17 @@ export interface ProjectCreationProgress {
  */
 export async function generateProjectPlan(
   description: string,
-  claudePath: string,
-  workingDirectory: string
+  adapter: LLMAdapter,
+  _workingDirectory: string
 ): Promise<string> {
+
+
+  // If using Stoked adapter, use the two-pass flow
+  if (adapter instanceof StokedAdapter) {
+    const strategy = await adapter.generateProductStrategy(description);
+    return adapter.generateImplementationPlan(strategy);
+  }
+
   const prompt = `You are a project planning assistant. Create a detailed phased project plan based on the following description.
 
 PROJECT DESCRIPTION:
@@ -84,43 +93,7 @@ Format your response EXACTLY as follows:
 ## Success Criteria
 [Overall project completion criteria]`;
 
-  return new Promise((resolve, reject) => {
-    const { ANTHROPIC_API_KEY: _ANTHROPIC_API_KEY, ...cleanEnv } = process.env;
-
-    const child = spawn(claudePath, ['--print', '--dangerously-skip-permissions'], {
-      cwd: workingDirectory,
-      env: {
-        ...cleanEnv,
-        CLAUDE_INSTANCE_ID: 'project-planner',
-      },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    let output = '';
-    let errorOutput = '';
-
-    child.stdout?.on('data', (data: Buffer) => {
-      output += data.toString();
-    });
-
-    child.stderr?.on('data', (data: Buffer) => {
-      errorOutput += data.toString();
-    });
-
-    child.on('exit', (code) => {
-      if (code === 0) {
-        resolve(output.trim());
-      } else {
-        reject(new Error(`Claude exited with code ${code}: ${errorOutput}`));
-      }
-    });
-
-    child.on('error', reject);
-
-    // Write prompt to stdin and close
-    child.stdin?.write(prompt);
-    child.stdin?.end();
-  });
+  return adapter.prompt(prompt);
 }
 
 /**
@@ -129,8 +102,8 @@ Format your response EXACTLY as follows:
 export async function refineProjectPlan(
   currentPlan: string,
   feedback: string,
-  claudePath: string,
-  workingDirectory: string
+  adapter: LLMAdapter,
+  _workingDirectory: string
 ): Promise<string> {
   const prompt = `You are a project planning assistant. Refine the following project plan based on user feedback.
 
@@ -144,42 +117,7 @@ Please update the plan according to the feedback while maintaining the same form
 
 Output the complete updated plan in the same format.`;
 
-  return new Promise((resolve, reject) => {
-    const { ANTHROPIC_API_KEY: _ANTHROPIC_API_KEY, ...cleanEnv } = process.env;
-
-    const child = spawn(claudePath, ['--print', '--dangerously-skip-permissions'], {
-      cwd: workingDirectory,
-      env: {
-        ...cleanEnv,
-        CLAUDE_INSTANCE_ID: 'project-planner',
-      },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    let output = '';
-    let errorOutput = '';
-
-    child.stdout?.on('data', (data: Buffer) => {
-      output += data.toString();
-    });
-
-    child.stderr?.on('data', (data: Buffer) => {
-      errorOutput += data.toString();
-    });
-
-    child.on('exit', (code) => {
-      if (code === 0) {
-        resolve(output.trim());
-      } else {
-        reject(new Error(`Claude exited with code ${code}: ${errorOutput}`));
-      }
-    });
-
-    child.on('error', reject);
-
-    child.stdin?.write(prompt);
-    child.stdin?.end();
-  });
+  return adapter.prompt(prompt);
 }
 
 /**
@@ -314,8 +252,8 @@ export async function createProjectIssues(
  */
 export async function generateProductStrategy(
   description: string,
-  claudePath: string,
-  workingDirectory: string
+  adapter: LLMAdapter,
+  _workingDirectory: string
 ): Promise<ProductStrategy> {
   const prompt = `You are a Staff-level Product Manager working on a complex social platform that includes user profiles, media uploads, posting, messaging, live streaming, notifications, and privacy controls.
 
@@ -477,7 +415,13 @@ STYLE REQUIREMENTS
 - Use examples grounded in social/community platforms
 ========================`;
 
-  const rawOutput = await runClaudePrompt(claudePath, workingDirectory, prompt);
+  let rawOutput: string;
+
+  if (adapter instanceof StokedAdapter) {
+    rawOutput = await adapter.generateProductStrategy(description);
+  } else {
+    rawOutput = await adapter.prompt(prompt);
+  }
   const validation = validateProductStrategy(rawOutput);
 
   return {
@@ -493,7 +437,7 @@ STYLE REQUIREMENTS
  */
 export async function generateImplementationPlan(
   productStrategy: ProductStrategy,
-  claudePath: string,
+  adapter: LLMAdapter,
   workingDirectory: string
 ): Promise<ImplementationPlan> {
   const prompt = `You are a senior staff-level software engineer and systems architect responsible for turning high-level ideas into concrete, implementable work for an experienced engineering team.
@@ -596,7 +540,14 @@ Format your response EXACTLY as follows (keep the headings and numbering structu
 - Testing and observability expectations (coverage for critical paths, metrics/alerts added, dashboards updated).  
 - Any migration or rollout criteria (e.g., "old path fully deprecated", "no data loss during cutover").]`;
 
-  const rawOutput = await runClaudePrompt(claudePath, workingDirectory, prompt);
+  let rawOutput: string;
+
+  if (adapter instanceof StokedAdapter) {
+    // We pass the raw output of the strategy to the adapter
+    rawOutput = await adapter.generateImplementationPlan(productStrategy.rawOutput);
+  } else {
+    rawOutput = await adapter.prompt(prompt);
+  }
   const validation = validateImplementationPlan(rawOutput);
 
   // Save to docs/projects/
@@ -617,8 +568,8 @@ Format your response EXACTLY as follows (keep the headings and numbering structu
 export async function refineProductStrategy(
   currentStrategy: ProductStrategy,
   feedback: string,
-  claudePath: string,
-  workingDirectory: string
+  adapter: LLMAdapter,
+  _workingDirectory: string
 ): Promise<ProductStrategy> {
   const prompt = `You are a Staff-level Product Manager. Refine the following product strategy based on user feedback.
 
@@ -632,7 +583,7 @@ Please update the strategy according to the feedback while maintaining the same 
 
 Output the complete updated strategy in the same format.`;
 
-  const rawOutput = await runClaudePrompt(claudePath, workingDirectory, prompt);
+  const rawOutput = await adapter.prompt(prompt);
   const validation = validateProductStrategy(rawOutput);
 
   return {
@@ -650,7 +601,7 @@ export async function refineImplementationPlan(
   productStrategy: ProductStrategy,
   currentPlan: ImplementationPlan,
   feedback: string,
-  claudePath: string,
+  adapter: LLMAdapter,
   workingDirectory: string
 ): Promise<ImplementationPlan> {
   const prompt = `You are a senior staff-level software engineer. Refine the following implementation plan based on user feedback.
@@ -668,7 +619,7 @@ Please update the implementation plan according to the feedback while maintainin
 
 Output the complete updated plan in the same format.`;
 
-  const rawOutput = await runClaudePrompt(claudePath, workingDirectory, prompt);
+  const rawOutput = await adapter.prompt(prompt);
   const validation = validateImplementationPlan(rawOutput);
 
   // Update saved file
@@ -686,48 +637,7 @@ Output the complete updated plan in the same format.`;
 /**
  * Helper: Run Claude with a prompt and return output
  */
-async function runClaudePrompt(
-  claudePath: string,
-  workingDirectory: string,
-  prompt: string
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const { ANTHROPIC_API_KEY: _ANTHROPIC_API_KEY, ...cleanEnv } = process.env;
 
-    const child = spawn(claudePath, ['--print', '--dangerously-skip-permissions'], {
-      cwd: workingDirectory,
-      env: {
-        ...cleanEnv,
-        CLAUDE_INSTANCE_ID: 'project-planner',
-      },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-
-    let output = '';
-    let errorOutput = '';
-
-    child.stdout?.on('data', (data: Buffer) => {
-      output += data.toString();
-    });
-
-    child.stderr?.on('data', (data: Buffer) => {
-      errorOutput += data.toString();
-    });
-
-    child.on('exit', (code) => {
-      if (code === 0) {
-        resolve(output.trim());
-      } else {
-        reject(new Error(`Claude exited with code ${code}: ${errorOutput}`));
-      }
-    });
-
-    child.on('error', reject);
-
-    child.stdin?.write(prompt);
-    child.stdin?.end();
-  });
-}
 
 /**
  * Helper: Extract title from markdown output
@@ -742,7 +652,7 @@ function extractTitle(markdown: string, prefix: string): string {
  */
 function validateProductStrategy(output: string): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
-  
+
   // Check for required sections
   const requiredSections = [
     '# Product Strategy:',
@@ -776,35 +686,35 @@ function validateProductStrategy(output: string): { valid: boolean; errors: stri
  */
 function validateImplementationPlan(output: string): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
-  
+
   // Check for required sections
   if (!output.includes('# Project Plan:')) {
     errors.push('Missing required header: # Project Plan:');
   }
-  
+
   if (!output.includes('## Overview')) {
     errors.push('Missing required section: ## Overview');
   }
-  
+
   if (!output.includes('## Phase 1:')) {
     errors.push('Missing required section: ## Phase 1:');
   }
-  
+
   if (!output.includes('## Success Criteria')) {
     errors.push('Missing required section: ## Success Criteria');
   }
-  
+
   // Check for work items with proper structure
   const hasWorkItems = /###\s+\d+\.\d+\)/m.test(output);
   if (!hasWorkItems) {
     errors.push('No work items found (expected format: ### 1.1) Title)');
   }
-  
+
   // Check for implementation subsections in work items
   const hasImplementationDetails = output.includes('**Implementation Details:**');
   const hasDesignPatterns = output.includes('**Design Patterns / Data Structures:**');
   const hasAcceptanceCriteria = output.includes('**Acceptance Criteria:**');
-  
+
   if (!hasImplementationDetails) {
     errors.push('Work items missing Implementation Details sections');
   }
@@ -825,26 +735,25 @@ function validateImplementationPlan(output: string): { valid: boolean; errors: s
  * Helper: Save implementation plan to docs/projects/
  */
 async function saveImplementationPlan(
-  planOutput: string,
+  plan: string, // Changed from ImplementationPlan to string to match rawOutput
   workingDirectory: string
 ): Promise<string> {
   // Extract title for filename
-  const title = extractTitle(planOutput, 'Project Plan:');
+  const title = extractTitle(plan, 'Project Plan:');
   const slug = title
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .substring(0, 50);
-  
-  const timestamp = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-  const filename = `${timestamp}-${slug}.md`;
-  
-  // Ensure docs/projects/ directory exists
+    .substring(0, 50) || 'project-plan';
+
+  // Ensure docs/projects directory exists
   const docsDir = join(workingDirectory, 'docs', 'projects');
   await fs.mkdir(docsDir, { recursive: true });
-  
+
+  const filename = `${new Date().toISOString().split('T')[0]}-${slug}.md`;
   const filePath = join(docsDir, filename);
-  await fs.writeFile(filePath, planOutput, 'utf-8');
-  
+
+  await fs.writeFile(filePath, plan, 'utf-8');
+
   return filePath;
 }

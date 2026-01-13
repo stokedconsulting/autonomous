@@ -4,18 +4,21 @@ export const DEFAULT_CLI_PATHS: Record<LLMProvider, string> = {
   claude: 'claude',
   gemini: 'gemini',
   codex: 'codex',
+  stoked: 'stoked', // Meta-provider, likely unused path
 };
 
 export const DEFAULT_CLI_ARGS: Record<LLMProvider, string[]> = {
   claude: ['--dangerously-skip-permissions'],
   gemini: ['--yolo'],
   codex: ['--dangerously-bypass-approvals-and-sandbox'],
+  stoked: [],
 };
 
 export const DEFAULT_HOOKS_ENABLED: Record<LLMProvider, boolean> = {
   claude: true,
   gemini: false,
   codex: false,
+  stoked: false,
 };
 
 export function resolveCliPath(provider: LLMProvider, configured?: string): string {

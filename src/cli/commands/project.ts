@@ -19,7 +19,7 @@ import { WorktreeManager } from '../../git/worktree-manager.js';
 import { LLMFactory } from '../../llm/llm-factory.js';
 import { PromptBuilder } from '../../llm/prompt-builder.js';
 import { InstanceManager, InstanceSlot } from '../../core/instance-manager.js';
-import { resolveLLMProvider } from '../../utils/llm-provider.js';
+import { resolveLLMProvider, parseLLMProvider } from '../../utils/llm-provider.js';
 import { join } from 'path';
 import { promises as fs } from 'fs';
 import { basename } from 'path';
@@ -751,8 +751,8 @@ export async function projectListCommand(options: ProjectCommandOptions): Promis
           // AUTO-UPDATE: Add [In Progress] prefix if any items are actively being worked on
           // Only if not already done and not already marked
           if (!allProjectItemsDone && hasItemsInProgress &&
-              !project.title.startsWith('[Done]') &&
-              !project.title.startsWith('[In Progress]')) {
+            !project.title.startsWith('[Done]') &&
+            !project.title.startsWith('[In Progress]')) {
             try {
               const newTitle = `[In Progress] - ${project.title}`;
               await discovery.updateProjectTitle(project.id, newTitle);
@@ -893,10 +893,10 @@ export async function projectListCommand(options: ProjectCommandOptions): Promis
 
 interface ProjectStartOptions extends ProjectCommandOptions {
   item?: number;
-  dryRun?: boolean;
+  dryRun?: boolean;     // Don't actually start work, just show what would run
   review?: boolean;
   interactive?: boolean;  // Force Ink UI
-  maxParallel?: number;   // Max parallel evaluations (default: 1)
+  maxParallel?: number; // Maximum number of parallel issue evaluations (default: 1)
   provider?: string;
   ui?: boolean;           // Disable UI when false (--no-ui)
   cu?: boolean;           // Claude Unlimited mode - autonomous loop until PROJECT COMPLETE
@@ -1053,6 +1053,7 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
       claude: config.llms.claude.maxConcurrentIssues,
       gemini: config.llms.gemini.maxConcurrentIssues,
       codex: config.llms.codex.maxConcurrentIssues,
+      stoked: config.llms.stoked?.maxConcurrentIssues ?? 1,
     };
     const instanceManager = new InstanceManager(assignmentManager, maxSlots);
 
@@ -1170,8 +1171,7 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
         if (options.verbose) {
           console.log(
             chalk.yellow(
-              `   Unable to load failed review feedback for #${issueNumber}: ${
-                error instanceof Error ? error.message : String(error)
+              `   Unable to load failed review feedback for #${issueNumber}: ${error instanceof Error ? error.message : String(error)
               }`
             )
           );
@@ -1332,17 +1332,17 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
     // Generate prompt (continuation when resuming existing in-progress work)
     const prompt = resumingExistingWork
       ? PromptBuilder.buildContinuationPrompt({
-          assignment,
-          worktreePath,
-          lastSummary:
-            assignment.workSessions.length > 0
-              ? assignment.workSessions[assignment.workSessions.length - 1].summary
-              : undefined,
-        })
+        assignment,
+        worktreePath,
+        lastSummary:
+          assignment.workSessions.length > 0
+            ? assignment.workSessions[assignment.workSessions.length - 1].summary
+            : undefined,
+      })
       : PromptBuilder.buildInitialPrompt({
-          assignment,
-          worktreePath,
-        });
+        assignment,
+        worktreePath,
+      });
 
     // Start LLM instance
     console.log(chalk.blue('\n🤖 Starting LLM instance...'));
@@ -1578,8 +1578,7 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
                 if (options.verbose) {
                   console.log(
                     chalk.yellow(
-                      `   Unable to load failed review feedback for #${nextItem.content.number}: ${
-                        error instanceof Error ? error.message : String(error)
+                      `   Unable to load failed review feedback for #${nextItem.content.number}: ${error instanceof Error ? error.message : String(error)
                       }`
                     )
                   );
@@ -1708,6 +1707,7 @@ export async function projectStartCommand(projectIdentifier: string, options: Pr
 }
 
 interface ProjectCreateOptions extends ProjectCommandOptions {
+  provider?: string;
   review?: boolean;
   reviewed?: boolean;
   start?: boolean;
@@ -1748,7 +1748,7 @@ async function projectStartWithClaudeUnlimited(
   console.log(chalk.gray(`Session ID: ${sessionId}`));
 
   // Read the project prompt template
-  const promptFile = path.join(os.homedir(), '.claude-prompt', 'project.prompt');
+  const promptFile = path.join(os.homedir(), '.prompt-templates', 'start-project.prompt');
   let basePrompt: string;
   try {
     basePrompt = await fs.readFile(promptFile, 'utf-8');
@@ -1987,7 +1987,7 @@ async function projectStartWithUnattendedAutonomous(
   });
 
   // Read the project prompt template
-  const promptFile = path.join(os.homedir(), '.claude-prompt', 'project.prompt');
+  const promptFile = path.join(os.homedir(), '.prompt-templates', 'start-project.prompt');
   let basePrompt: string;
   try {
     basePrompt = await fs.readFile(promptFile, 'utf-8');
@@ -2237,13 +2237,17 @@ async function projectStartWithReview(
     }
 
 
-    const llmProvider = 'claude'; // For now, we are hardcoding this value
-    const llmConfig = config.llms[llmProvider];
-    const claudePath = llmConfig.cliPath || 'claude';
+    const llmProvider = options.provider ? parseLLMProvider(options.provider) || 'claude' : 'claude';
+    // Initialize LLM Factory
+    const autonomousDataDir = join(cwd, '.autonomous');
+    await fs.mkdir(autonomousDataDir, { recursive: true });
+
+    // Create the adapter
+    const adapter = LLMFactory.create([llmProvider], config.llms, autonomousDataDir, options.verbose || false);
 
     // Step 1: Generate project plan
     console.log(chalk.cyan('🤖 Generating project plan...\n'));
-    let currentPlan = await generateProjectPlan(description, claudePath, cwd);
+    let currentPlan = await generateProjectPlan(description, adapter, cwd);
 
     console.log(chalk.blue('━'.repeat(60)));
     console.log(currentPlan);
@@ -2282,7 +2286,7 @@ async function projectStartWithReview(
       } else {
         // Refine the plan based on feedback
         console.log(chalk.cyan('\n🔄 Refining plan based on your feedback...\n'));
-        currentPlan = await refineProjectPlan(currentPlan, input, claudePath, cwd);
+        currentPlan = await refineProjectPlan(currentPlan, input, adapter, cwd);
 
         console.log(chalk.blue('━'.repeat(60)));
         console.log(currentPlan);
@@ -2334,13 +2338,13 @@ async function projectStartWithReview(
       newProject.number,
       options.verbose
         ? (current: number, total: number, title: string) => {
-            console.log(chalk.gray(`  Creating (${current}/${total}): ${title}`));
-          }
+          console.log(chalk.gray(`  Creating (${current}/${total}): ${title}`));
+        }
         : (current: number, total: number) => {
-            if (current === 1) process.stdout.write('  ');
-            process.stdout.write(chalk.green('.'));
-            if (current === total) console.log('');
-          }
+          if (current === 1) process.stdout.write('  ');
+          process.stdout.write(chalk.green('.'));
+          if (current === total) console.log('');
+        }
     );
     console.log(chalk.green.bold(`\n✅ Project "${projectTitle}" created with ${items.length} issues!\n`));
 
@@ -2404,15 +2408,20 @@ export async function projectCreateCommand(
     }
 
 
-    const llmProvider = 'claude'; // For now, we are hardcoding this value
-    const llmConfig = config.llms[llmProvider];
-    const claudePath = llmConfig.cliPath || 'claude';
+    const llmProvider = (options.provider ? parseLLMProvider(options.provider) : 'claude') as LLMProvider;
+    // Initialize LLM Factory
+    const autonomousDataDir = join(cwd, '.autonomous');
+    await fs.mkdir(autonomousDataDir, { recursive: true });
+
+    // Create the adapter
+    // Note: We're not starting a full session here, just using the prompt method
+    const adapter = LLMFactory.create([llmProvider], config.llms, autonomousDataDir, options.verbose || false);
 
     // If --reviewed flag is set, use the two-stage Ink UI workflow
     if (options.reviewed) {
       await renderProjectCreation({
         description,
-        claudePath,
+        adapter,
         workingDirectory: cwd,
         onComplete: async (implementationPlanPath: string) => {
           console.log(chalk.green.bold('\n✅ Implementation plan approved!\n'));
@@ -2460,13 +2469,13 @@ export async function projectCreateCommand(
             newProject.number,
             options.verbose
               ? (current: number, total: number, title: string) => {
-                  console.log(chalk.gray(`  Creating (${current}/${total}): ${title}`));
-                }
+                console.log(chalk.gray(`  Creating (${current}/${total}): ${title}`));
+              }
               : (current: number, total: number) => {
-                  if (current === 1) process.stdout.write('  ');
-                  process.stdout.write(chalk.green('.'));
-                  if (current === total) console.log('');
-                }
+                if (current === 1) process.stdout.write('  ');
+                process.stdout.write(chalk.green('.'));
+                if (current === total) console.log('');
+              }
           );
 
           console.log(chalk.green.bold(`\n✅ Project "${projectTitle}" created with ${items.length} issues!\n`));
@@ -2482,7 +2491,7 @@ export async function projectCreateCommand(
 
     // Step 1: Generate project plan
     console.log(chalk.cyan('🤖 Generating project plan...\n'));
-    let currentPlan = await generateProjectPlan(description, claudePath, cwd);
+    let currentPlan = await generateProjectPlan(description, adapter, cwd);
 
     console.log(chalk.blue('━'.repeat(60)));
     console.log(currentPlan);
@@ -2522,7 +2531,7 @@ export async function projectCreateCommand(
         } else {
           // Refine the plan based on feedback
           console.log(chalk.cyan('\n🔄 Refining plan based on your feedback...\n'));
-          currentPlan = await refineProjectPlan(currentPlan, input, claudePath, cwd);
+          currentPlan = await refineProjectPlan(currentPlan, input, adapter, cwd);
 
           console.log(chalk.blue('━'.repeat(60)));
           console.log(currentPlan);
@@ -2574,13 +2583,13 @@ export async function projectCreateCommand(
       newProject.number,
       options.verbose
         ? (current: number, total: number, title: string) => {
-            console.log(chalk.gray(`  Creating (${current}/${total}): ${title}`));
-          }
+          console.log(chalk.gray(`  Creating (${current}/${total}): ${title}`));
+        }
         : (current: number, total: number) => {
-            if (current === 1) process.stdout.write('  ');
-            process.stdout.write(chalk.green('.'));
-            if (current === total) console.log('');
-          }
+          if (current === 1) process.stdout.write('  ');
+          process.stdout.write(chalk.green('.'));
+          if (current === total) console.log('');
+        }
     );
     console.log(chalk.green.bold(`\n✅ Project "${projectTitle}" created with ${items.length} issues!\n`));
 
@@ -2610,6 +2619,7 @@ export async function projectCreateCommand(
 
 interface ProjectAddOptions extends ProjectCommandOptions {
   project: string;
+  provider?: string;
   start?: boolean;
 }
 
@@ -2641,9 +2651,15 @@ export async function projectAddCommand(
       process.exit(1);
     }
 
-const llmProvider = 'claude'; // For now, we are hardcoding this value
-    const llmConfig = config.llms[llmProvider];
-    const claudePath = llmConfig.cliPath || 'claude';
+    const llmProvider = options.provider ? parseLLMProvider(options.provider) || 'claude' : 'claude';
+
+    // Initialize LLM Factory
+    const autonomousDataDir = join(cwd, '.autonomous');
+    await fs.mkdir(autonomousDataDir, { recursive: true });
+
+    // Create the adapter
+    const adapter = LLMFactory.create([llmProvider], config.llms, autonomousDataDir, options.verbose || false);
+
     const discovery = new ProjectDiscovery(config.github.owner, config.github.repo);
     const linkedProjects = await discovery.getLinkedProjects();
 
@@ -2682,7 +2698,7 @@ const llmProvider = 'claude'; // For now, we are hardcoding this value
 
     // Generate project plan
     console.log(chalk.cyan('\n🤖 Generating work items...\n'));
-    const currentPlan = await generateProjectPlan(description, claudePath, cwd);
+    const currentPlan = await generateProjectPlan(description, adapter, cwd);
 
     console.log(chalk.blue('━'.repeat(60)));
     console.log(currentPlan);
@@ -2716,13 +2732,13 @@ const llmProvider = 'claude'; // For now, we are hardcoding this value
       targetProject.number,
       options.verbose
         ? (current: number, total: number, title: string) => {
-            console.log(chalk.gray(`  Creating (${current}/${total}): ${title}`));
-          }
+          console.log(chalk.gray(`  Creating (${current}/${total}): ${title}`));
+        }
         : (current: number, total: number) => {
-            if (current === 1) process.stdout.write('  ');
-            process.stdout.write(chalk.green('.'));
-            if (current === total) console.log('');
-          }
+          if (current === 1) process.stdout.write('  ');
+          process.stdout.write(chalk.green('.'));
+          if (current === total) console.log('');
+        }
     );
     console.log(chalk.green.bold(`\n✅ Issues added to project "${targetProject.title}"!\n`));
 

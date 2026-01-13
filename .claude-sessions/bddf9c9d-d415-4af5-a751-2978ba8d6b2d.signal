@@ -1,0 +1,8 @@
+{
+  "state": "idle",
+  "timestamp": "2026-01-13T04:28:32.000Z",
+  "session_id": "bddf9c9d-d415-4af5-a751-2978ba8d6b2d",
+  "event": "Notification",
+  "notification_type": "idle_prompt",
+  "project_dir": "/Users/stoked/work/autonomous"
+}

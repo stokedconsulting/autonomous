@@ -60,7 +60,7 @@ export async function renderOrchestratorMonitor(props: OrchestratorMonitorAppPro
  */
 export async function renderProjectCreation(props: {
   description: string;
-  claudePath: string;
+  adapter: any; // Using any here to avoid circular dependency with core types, or import LLMAdapter
   workingDirectory: string;
   onComplete?: (implementationPlanPath: string) => void;
   onCancel?: () => void;
