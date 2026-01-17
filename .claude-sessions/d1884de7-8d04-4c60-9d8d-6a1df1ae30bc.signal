@@ -1,7 +1,8 @@
 {
-  "state": "responding",
-  "timestamp": "2026-01-13T04:35:19.000Z",
+  "state": "idle",
+  "timestamp": "2026-01-13T04:38:45.000Z",
   "session_id": "d1884de7-8d04-4c60-9d8d-6a1df1ae30bc",
-  "event": "UserPromptSubmit",
+  "event": "Notification",
+  "notification_type": "idle_prompt",
   "project_dir": "/Users/stoked/work/autonomous"
 }
